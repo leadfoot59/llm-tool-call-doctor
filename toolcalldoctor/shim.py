@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 import uuid
@@ -619,7 +620,11 @@ class ShimHandler(BaseHTTPRequestHandler):
             try:
                 target = Path(path).expanduser()
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(payload, encoding="utf-8")
+                # Write via a temp file and rename, so two shims pointed at the
+                # same dump path can never interleave a half-written file.
+                staging = target.with_name(f"{target.name}.tmp-{os.getpid()}")
+                staging.write_text(payload, encoding="utf-8")
+                os.replace(staging, target)
             except OSError as exc:
                 return f"could not write tool dump to {path}: {exc}"
             _DUMP_STATE[path] = digest

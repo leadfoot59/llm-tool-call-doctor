@@ -552,6 +552,22 @@ class TestToolDump(unittest.TestCase):
                 backend.stop()
                 _DUMP_STATE.pop(str(target), None)
 
+    def test_dump_leaves_no_staging_file_behind(self):
+        # Two shims can share one dump path, so the write is a temp-file rename.
+        backend = start_fake_backend()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "captured.json"
+            shim = start_shim(backend.base_url, dump_tools=str(target))
+            try:
+                post_json(f"{shim.base_url}/chat/completions", payload("fake/hermes"))
+                leftovers = [
+                    p.name for p in Path(tmp).iterdir() if p.name != "captured.json"
+                ]
+                self.assertEqual(leftovers, [], f"staging files left behind: {leftovers}")
+            finally:
+                shim.stop()
+                backend.stop()
+
     def test_unwritable_dump_path_is_not_fatal(self):
         backend = start_fake_backend()
         with tempfile.TemporaryDirectory() as tmp:

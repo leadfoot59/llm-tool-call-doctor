@@ -23,9 +23,9 @@ PYTHON="${PYTHON:-python3}"
 LOG_DIR="$REPO_DIR/.tmp"
 TRACE_DIR="${TRACE_DIR:-$REPO_DIR}"
 WAIT_SECONDS="${WAIT_SECONDS:-20}"
-# Set DUMP_TOOLS=path to have the ollama shim record the tool definitions your
-# harness sends. Point DSH at the shim, send one message, and the file holds
-# the real toolbox in cases/agent_tools.json format.
+# Set DUMP_TOOLS=path to have the shims record the tool definitions your harness
+# sends. Point DSH at either shim, send one message, and the file holds the real
+# toolbox in cases/agent_tools.json format.
 DUMP_TOOLS="${DUMP_TOOLS:-}"
 
 # name|port|upstream base URL|trace file
@@ -131,10 +131,12 @@ start_one() { # <name> <port> <upstream> <trace>
     *)       dim "  $name: upstream $upstream returned HTTP $state" ;;
   esac
 
-  # Only the primary shim records tool definitions; the harness talks to it.
+  # Every shim records tool definitions, because which one your harness talks to
+  # depends on the provider you selected -- it is not always the first one.
+  # The write is atomic, so sharing one path between shims is safe.
   # The ${arr[@]+...} form keeps `set -u` happy on bash 3.2 with an empty array.
   local extra_args=()
-  if [ -n "$DUMP_TOOLS" ] && [ "$port" = "11500" ]; then
+  if [ -n "$DUMP_TOOLS" ]; then
     extra_args=(--dump-tools "$DUMP_TOOLS")
   fi
 
