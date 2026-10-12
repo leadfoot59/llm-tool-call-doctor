@@ -1,0 +1,151 @@
+{
+  "_comment": "A generic coding-agent toolbox for `toolcalldoctor agent`. These are NOT any specific harness's schemas -- replace this file with your harness's real tool definitions for a faithful experiment. Names here are what --menus selects from.",
+  "_warning": "Every tool listed here MUST be executable by the simulator, or the experiment is confounded: a model that reasonably calls a tool the simulator refuses will fail through no fault of its own. Tools like subagent, web_search and web_fetch are deliberately absent for that reason. Add your own only if you also implement them in toolcalldoctor/agent.py.",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "bash",
+        "description": "Run a shell command in the working directory.",
+        "parameters": {
+          "type": "object",
+          "required": ["command"],
+          "properties": {
+            "command": { "type": "string", "description": "The shell command to run" },
+            "description": { "type": "string", "description": "What the command does" },
+            "justification": { "type": "string", "description": "Why it is needed" },
+            "run_in_background": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read",
+        "description": "Read a file's contents. Does not expand glob patterns.",
+        "parameters": {
+          "type": "object",
+          "required": ["file_path"],
+          "properties": {
+            "file_path": { "type": "string", "description": "Path to a single file" },
+            "offset": { "type": "integer" },
+            "limit": { "type": "integer" }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "write",
+        "description": "Write content to a file, replacing anything already there.",
+        "parameters": {
+          "type": "object",
+          "required": ["file_path", "content"],
+          "properties": {
+            "file_path": { "type": "string" },
+            "content": { "type": "string" }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "edit",
+        "description": "Replace an exact string in a file with a new string.",
+        "parameters": {
+          "type": "object",
+          "required": ["file_path", "old_string", "new_string"],
+          "properties": {
+            "file_path": { "type": "string" },
+            "old_string": { "type": "string" },
+            "new_string": { "type": "string" }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "glob",
+        "description": "Find files matching a glob pattern.",
+        "parameters": {
+          "type": "object",
+          "required": ["pattern"],
+          "properties": {
+            "pattern": { "type": "string" },
+            "path": { "type": "string" }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "grep",
+        "description": "Search file contents with a regular expression.",
+        "parameters": {
+          "type": "object",
+          "required": ["pattern"],
+          "properties": {
+            "pattern": { "type": "string" },
+            "path": { "type": "string" }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_dir",
+        "description": "List the entries of a directory.",
+        "parameters": {
+          "type": "object",
+          "properties": { "path": { "type": "string" } }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "ask_user_question",
+        "description": "Ask the user a question and wait for the answer.",
+        "parameters": {
+          "type": "object",
+          "required": ["questions"],
+          "properties": {
+            "questions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "question"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "header": { "type": "string" },
+                  "question": { "type": "string" },
+                  "options": { "type": "array", "items": { "type": "object" } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "todo_write",
+        "description": "Record or update the task list.",
+        "parameters": {
+          "type": "object",
+          "required": ["todos"],
+          "properties": {
+            "todos": { "type": "array", "items": { "type": "object" } }
+          }
+        }
+      }
+    }
+  ]
+}

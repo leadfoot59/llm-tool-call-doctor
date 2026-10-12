@@ -6,6 +6,7 @@ dist/
 .venv/
 venv/
 .tmp/
+.backup/
 *.jsonl
 .pytest_cache/
 .DS_Store

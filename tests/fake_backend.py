@@ -68,7 +68,152 @@ DIALECTS = (
     "garbage_call",
     "empty",
     "nofmt",
+    # Multi-turn agent behaviours, driven by the assistant-turn count and by
+    # which tools the request actually advertises.
+    "agent_good",
+    "agent_loop",
+    "agent_ask",
+    "agent_empty",
+    "agent_write_literal",
+    "agent_write_then_chatter",
 )
+
+
+def _assistant_turns(messages: list[Any]) -> int:
+    return sum(
+        1
+        for message in messages
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    )
+
+
+def _agent_tool_call(index: int, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    return (
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": f"call_agent_{index}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)},
+                }
+            ],
+        },
+        "tool_call",
+    )
+
+
+def _agent_script(prompt: str, available: set[str]) -> tuple[list[tuple[str, dict[str, Any]]], str]:
+    """Plan a task using only the tools this request advertised.
+
+    A competent model uses what it has; the fake mimics that so the matrix is
+    meaningful rather than an artefact of the simulator.
+    """
+    lowered = prompt.lower()
+    if "multiplied" in lowered:
+        return [], "68"
+    if ".md" in lowered:
+        return [], "2"
+    if "debug" in lowered:
+        if "edit" in available:
+            return [
+                ("read", {"file_path": "config.txt"}),
+                (
+                    "edit",
+                    {
+                        "file_path": "config.txt",
+                        "old_string": "debug=false",
+                        "new_string": "debug=true",
+                    },
+                ),
+            ], "Done: debug is now true."
+        if "bash" in available:
+            return [
+                ("bash", {"command": "sed -i '' 's/debug=false/debug=true/' config.txt"}),
+                ("bash", {"command": "cat config.txt"}),
+            ], "Done: debug is now true."
+        return [], "I don't have a tool that can edit files."
+    # Default: the count-and-write task.
+    if "bash" in available:
+        return [
+            ("bash", {"command": "ls -la"}),
+            ("bash", {"command": "cat notes.txt"}),
+            ("bash", {"command": "wc -l < notes.txt > result.txt"}),
+            ("bash", {"command": "ls -la result.txt"}),
+        ], "The number of lines in notes.txt is 3."
+    if {"read", "write", "list_dir"} <= available:
+        return [
+            ("list_dir", {}),
+            ("read", {"file_path": "notes.txt"}),
+            ("write", {"file_path": "result.txt", "content": "3"}),
+            ("read", {"file_path": "result.txt"}),
+        ], "The number of lines in notes.txt is 3."
+    return [], "I don't have the tools needed to create result.txt."
+
+
+def build_agent_turn(
+    dialect: str, messages: list[Any], prompt: str, tools: list[Any]
+) -> tuple[dict[str, Any], str]:
+    """Scripted multi-turn behaviour, selected by dialect."""
+    step = _assistant_turns(messages)
+    available = {
+        (tool.get("function") or {}).get("name")
+        for tool in tools
+        if isinstance(tool, dict)
+    }
+    available.discard(None)
+
+    if dialect == "agent_loop":
+        return _agent_tool_call(step, "bash", {"command": "ls -la"})
+
+    if dialect == "agent_ask":
+        return _agent_tool_call(
+            step,
+            "ask_user_question",
+            {"questions": [{"id": "which", "question": "Which file should I read?"}]},
+        )
+
+    if dialect == "agent_empty" and step == 0:
+        return {"role": "assistant", "content": ""}, "stop"
+
+    if dialect == "agent_write_literal":
+        script = [
+            ("list_dir", {}),
+            ("read", {"file_path": "notes.txt"}),
+            (
+                "write",
+                {"file_path": "result.txt", "content": "$(wc -l < notes.txt)"},
+            ),
+            ("read", {"file_path": "result.txt"}),
+            ("read", {"file_path": "result.txt"}),
+            ("read", {"file_path": "result.txt"}),
+        ]
+        if step < len(script):
+            name, args = script[step]
+            return _agent_tool_call(step, name, args)
+        return {"role": "assistant", "content": "result.txt is written."}, "stop"
+
+    if dialect == "agent_write_then_chatter":
+        # Completes the work, then keeps going with *different* commands, so
+        # the repeat detector does not fire and it runs out of turns instead.
+        script = [
+            ("write", {"file_path": "made.txt", "content": "yes"}),
+            ("bash", {"command": "ls -la"}),
+            ("bash", {"command": "cat made.txt"}),
+            ("bash", {"command": "pwd"}),
+            ("bash", {"command": "echo done"}),
+        ]
+        if step < len(script):
+            name, args = script[step]
+            return _agent_tool_call(step, name, args)
+        return {"role": "assistant", "content": "All done."}, "stop"
+
+    script, final = _agent_script(prompt, available)
+    if step < len(script):
+        name, args = script[step]
+        return _agent_tool_call(step, name, args)
+    return {"role": "assistant", "content": final}, "stop"
 
 
 def choose_tool(prompt: str, tools: list[dict[str, Any]]) -> str | None:
@@ -232,6 +377,8 @@ def build_completion(model: str, body: dict[str, Any]) -> dict[str, Any]:
                         for match in re.findall(r'^\* "([^"]+)"', text, re.M)
                     ]
     name = choose_tool(prompt, tools)
+    if dialect.startswith("agent_"):
+        return build_agent_turn(dialect, messages, prompt, tools)
     if name is None:
         return {
             "role": "assistant",

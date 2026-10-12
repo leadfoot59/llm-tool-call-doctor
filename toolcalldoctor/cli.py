@@ -16,6 +16,7 @@ from .pipeline import Options, dump_result, parse_text, result_summary
 from .probe import PROBES, format_probe_report, run_probe
 from .score import compare_reports, format_report, load_cases, run_suite
 from .shim import ShimConfig, serve
+from .textutil import truncate
 from .types import ToolSpec
 
 DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1"
@@ -209,6 +210,118 @@ def _report_to_dict(report) -> dict[str, Any]:
     return data
 
 
+def cmd_agent(args: argparse.Namespace) -> int:
+    from .agent import (
+        format_matrix,
+        load_tasks,
+        load_toolbox,
+        parse_menus,
+        recommend,
+        run_matrix,
+    )
+
+    tasks = load_tasks(args.tasks)
+    toolbox = load_toolbox(args.toolbox)
+    if args.task:
+        wanted = set(args.task)
+        tasks = [t for t in tasks if t.name in wanted]
+        if not tasks:
+            _print(f"no tasks matched {sorted(wanted)}")
+            return 2
+    menus = parse_menus(args.menus, toolbox)
+
+    if args.dry_run:
+        _print("dry run: no tool will be executed\n")
+    _print(
+        f"agent matrix: {len(tasks)} task(s) x {len(menus)} menu(s) = "
+        f"{len(tasks) * len(menus)} run(s)"
+    )
+    for menu in menus:
+        names = menu.tool_names
+        label = "all" if names is None else ", ".join(names)
+        _print(f"  menu {menu.label:<28} -> {label}")
+    _print()
+
+    results: list = []
+
+    def progress(task, menu, outcome) -> None:
+        results.append(outcome)
+        mark = "PASS" if outcome.passed else outcome.outcome.upper()
+        if outcome.goal_met and not outcome.passed:
+            mark = f"GOAL/{outcome.outcome}"
+        calls = ", ".join(
+            f"{c['name']}" for turn in outcome.transcript for c in turn.calls
+        ) or "-"
+        _print(
+            f"  [{len(results):>2}] {task.name:<22} {menu.label:<24} {mark:<9} "
+            f"turns={outcome.turns} {truncate(calls, 50)}"
+        )
+
+    results = run_matrix(
+        tasks,
+        menus,
+        toolbox,
+        base_url=args.base_url,
+        model=args.model,
+        api_key=args.api_key,
+        repeat=args.repeat,
+        on_progress=progress,
+        temperature=args.temperature,
+        max_tokens=args.max_tokens,
+        stream=args.stream,
+        native_only=args.native_only,
+        dry_run=args.dry_run,
+        read_only=args.read_only,
+        repeat_limit=args.repeat_limit,
+        tool_timeout=args.tool_timeout,
+        keep_workdir=args.keep_workdir,
+        timeout=args.timeout,
+    )
+
+    _print()
+    _print(format_matrix(results, show_transcript=args.transcript))
+    _print()
+    _print(recommend(results, toolbox))
+
+    if args.json:
+        payload = {
+            "model": args.model,
+            "base_url": args.base_url,
+            "menus": [menu.label for menu in menus],
+            "tasks": [task.name for task in tasks],
+            "results": [
+                {
+                    "task": r.task,
+                    "menu": r.menu,
+                    "outcome": r.outcome,
+                    "passed": r.passed,
+                    "turns": r.turns,
+                    "tool_calls": r.tool_calls,
+                    "tool_usage": r.tool_usage,
+                    "elapsed": r.elapsed,
+                    "violations": r.violations,
+                    "notes": r.notes,
+                    "error": r.error,
+                    "transcript": [
+                        {
+                            "index": turn.index,
+                            "action": turn.action,
+                            "calls": turn.calls,
+                            "results": turn.results,
+                        }
+                        for turn in r.transcript
+                    ],
+                }
+                for r in results
+            ],
+        }
+        Path(args.json).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _print()
+        _print(f"run details written to {args.json}")
+
+    return 0 if all(r.goal_met for r in results) else 1
+
+
 def cmd_selftest(args: argparse.Namespace) -> int:
     """Run the bundled unit tests with the current interpreter."""
     import unittest
@@ -390,6 +503,79 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit non-zero if accuracy is below this fraction (for CI)",
     )
     p_score.set_defaults(func=cmd_score)
+
+    p_agent = sub.add_parser(
+        "agent",
+        help="run real multi-turn agent tasks across several tool menus",
+        description=(
+            "Drives a multi-turn agent loop, executing recovered tool calls in a "
+            "throwaway directory, then checks the resulting files. Run the same "
+            "tasks across several tool menus to find out whether (and how much) "
+            "to trim the menu your model sees.\n\n"
+            "SAFETY: this executes shell commands written by a language model. "
+            "The guard is a seatbelt against accidents, NOT a security boundary. "
+            "Use --dry-run to plan without executing, or run it in a container."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_agent.add_argument(
+        "--tasks", default="cases/agent_tasks.json", help="task file (JSON)"
+    )
+    p_agent.add_argument(
+        "--toolbox",
+        default="cases/agent_tools.json",
+        help="full tool set the menus are drawn from (JSON)",
+    )
+    p_agent.add_argument(
+        "--menus",
+        nargs="+",
+        default=["all"],
+        help="tool menus to try. 'all' means every tool; otherwise a list of "
+        "tool names, e.g. --menus all \"bash read\" bash",
+    )
+    p_agent.add_argument("--base-url", default=DEFAULT_BASE_URL)
+    p_agent.add_argument("--api-key")
+    p_agent.add_argument("--model", default="", help="model id to request")
+    p_agent.add_argument("--task", action="append", help="run only these tasks")
+    p_agent.add_argument("--temperature", type=float, default=0.0)
+    p_agent.add_argument("--max-tokens", type=int, default=512)
+    p_agent.add_argument("--stream", action="store_true")
+    p_agent.add_argument(
+        "--native-only",
+        action="store_true",
+        help="read only message.tool_calls, as a strict harness would",
+    )
+    p_agent.add_argument(
+        "--repeat-limit",
+        type=int,
+        default=3,
+        help="stop a run after the same call repeats this many times (default 3)",
+    )
+    p_agent.add_argument("--tool-timeout", type=float, default=10.0)
+    p_agent.add_argument("--timeout", type=float, default=300.0, help="per-request timeout")
+    p_agent.add_argument("--repeat", type=int, default=1)
+    p_agent.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="plan the calls without executing anything",
+    )
+    p_agent.add_argument(
+        "--read-only",
+        action="store_true",
+        help="refuse write/edit tool calls",
+    )
+    p_agent.add_argument(
+        "--keep-workdir",
+        action="store_true",
+        help="do not delete the scratch directory (for debugging)",
+    )
+    p_agent.add_argument(
+        "--transcript",
+        metavar="TASK",
+        help="print the turn-by-turn transcript for this task",
+    )
+    p_agent.add_argument("--json", help="write full run details to this path")
+    p_agent.set_defaults(func=cmd_agent)
 
     p_self = sub.add_parser("selftest", help="run the bundled unit tests")
     p_self.add_argument("-v", "--verbosity", type=int, default=2)

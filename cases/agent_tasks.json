@@ -1,0 +1,56 @@
+{
+  "_comment": "Multi-turn agent tasks for `toolcalldoctor agent`. Each task sets up a directory, runs a real agent loop, and then checks the resulting files -- so pass/fail is measured, not eyeballed.",
+  "_expect_files": "exact content after trimming whitespace; use \"*\" for 'exists with any non-empty content'",
+  "_expect_absent": "paths that must NOT exist afterwards",
+  "_expect_final_contains": "substrings (case-insensitive) the final assistant message must contain; omit to skip",
+  "tasks": [
+    {
+      "name": "count_and_write",
+      "tags": ["multi-step", "writes-file"],
+      "prompt": "Use the bash tool to inspect this directory. First list the files. Then read notes.txt. Then create a file called result.txt containing the number of lines in notes.txt. Finally verify result.txt exists. Do not modify any other files.",
+      "setup": {
+        "notes.txt": "alpha\nbeta\ngamma\n"
+      },
+      "expect_files": { "result.txt": "3" },
+      "expect_absent": [],
+      "max_turns": 8
+    },
+    {
+      "name": "edit_one_value",
+      "tags": ["edits-file"],
+      "prompt": "In this directory there is a file called config.txt. Change the value of the debug setting from false to true. Leave the rest of the file exactly as it is.",
+      "setup": {
+        "config.txt": "host=localhost\nport=8080\ndebug=false\n"
+      },
+      "expect_files": {
+        "config.txt": "host=localhost\nport=8080\ndebug=true"
+      },
+      "expect_absent": [],
+      "max_turns": 8
+    },
+    {
+      "name": "answer_no_tool",
+      "tags": ["no-tool", "force-fit"],
+      "prompt": "What is 17 multiplied by 4? Answer with just the number and nothing else.",
+      "setup": {},
+      "expect_files": {},
+      "expect_absent": [],
+      "expect_final_contains": ["68"],
+      "max_turns": 4
+    },
+    {
+      "name": "count_markdown_files",
+      "tags": ["read-only"],
+      "prompt": "How many files in this directory end with the .md extension? Answer with just the number.",
+      "setup": {
+        "a.md": "one\n",
+        "b.md": "two\n",
+        "notes.txt": "three\n"
+      },
+      "expect_files": {},
+      "expect_absent": [],
+      "expect_final_contains": ["2"],
+      "max_turns": 6
+    }
+  ]
+}

@@ -40,6 +40,7 @@ Three tools, one goal, no dependencies (pure Python standard library):
 | `probe` | tells you which tool-call wire format your model *actually* emits |
 | `shim` | OpenAI-compatible proxy that deterministically repairs malformed calls |
 | `score` | measures parse / tool-selection / argument accuracy, before and after |
+| `agent` | runs real multi-turn tasks across several tool menus, to size the menu |
 
 ## Install
 
@@ -102,6 +103,124 @@ not a serialization error, and the harness correctly reports it as
 Trimming only changes what is advertised. Calls to unadvertised tools are still
 accepted and delivered, so a filtering mistake can never turn a valid call into
 a silent stall.
+
+## Sizing the menu with `agent`
+
+`score` measures one turn. The failures that hurt most — picking the wrong
+tool, looping, giving up and asking the user — only show up across turns. So
+`agent` drives a real loop: send the conversation, execute whatever tool the
+model asks for in a throwaway directory, feed the result back, repeat until the
+model answers or a limit trips. Then it checks the resulting **files**, so
+pass/fail is measured rather than eyeballed.
+
+Run one task set across several menus and let the data answer "how much should
+I trim?":
+
+```bash
+python3 -m toolcalldoctor agent --model qwen2.5-coder:7b \
+    --base-url http://127.0.0.1:11434/v1 \
+    --menus all "bash read" bash
+```
+
+```
+  task                  menu       result     turns  calls  tools used
+  count_and_write       all        BLOCKED    7      7      bash x2, write x1, read x1, todo_write x1
+  count_and_write       bash read  MAX_TURNS  8      11     bash x10, read x1
+  count_and_write       bash       MAX_TURNS  8      8      bash x8
+  edit_one_value        all        BLOCKED    2      2      edit x1, ask_user_question x1
+  edit_one_value        bash read  LOOPING    4      4      bash x3, read x1
+  edit_one_value        bash       LOOPING    3      3      bash x3
+  answer_no_tool        all        PASS       1      0      -
+  count_markdown_files  all        PASS       2      1      glob x1
+  count_markdown_files  bash read  LOOPING    3      3      read x3
+  count_markdown_files  bash       PASS       2      1      bash x1
+
+  by menu:
+    menu       goal met  clean stop  avg turns  blocked  looping
+    all        3/4       2/4         3.0        2        0
+    bash read  2/4       1/4         4.0        0        2
+    bash       3/4       2/4         3.5        0        1
+
+  => no menu achieved every task (best: all with 3/4). If every menu scored
+     about the same, the limit is the model, not the menu size.
+```
+
+Those are real numbers from `qwen2.5-coder:7b` on macOS/Ollama, and they are
+worth reading carefully: the **two-tool menu scored worst**. `read` without
+`glob` left the model trying to `read` a directory and repeating, while `bash`
+alone and the full menu both managed that task. A partial menu can create dead
+ends that neither a leaner nor a fuller one has.
+
+Each run reports **two independent things**: why it ended, and whether the goal
+was actually met.
+
+| outcome (why it ended) | meaning |
+|---|---|
+| `passed` | model produced a final answer, and the expectations were met |
+| `failed` | model produced a final answer, with the wrong result |
+| `max_turns` | ran out of turns — the goal may or may not be met |
+| `looping` | the same call repeated `--repeat-limit` times |
+| `blocked` | the agent asked the user a question and would wait |
+| `error` / `planned` | transport failure / dry run (neither is judged) |
+
+| field | meaning |
+|---|---|
+| `goal met` | the expected files exist and any expected final answer was given |
+| `clean stop` | the model stopped on its own *and* met the goal |
+
+They are deliberately separate. An agent can create the right file and then
+loop, run out of turns, or ask the user a question — three different problems
+sharing one outcome. Reporting them as a single "failed" hides which one you
+have, and the fix is different in each case. A `goal met` but not-`clean` run
+means you have a stopping problem, not a capability problem.
+
+Expecting a final answer (`expect_final_contains`) only counts if the model
+actually produced one — an agent that loops on tool calls has not answered the
+question, however tidy the directory looks.
+
+**The verdict is data, not a rule.** If every menu scores the same, the verdict
+says so: the limit is the model, not the menu size, and trimming will not help.
+If a small menu wins, it names the smallest one that achieves everything.
+
+Two methodology notes, both learned by running this against a real model:
+
+- **Every advertised tool must be executable.** An early version of the shipped
+  toolbox advertised `subagent`, which the simulator refuses. A model that
+  reasonably delegated to it failed through no fault of its own, and menu size
+  looked like the culprit when it was not. The shipped toolbox now lists only
+  tools the simulator can run, and there is a test asserting that.
+- **One run is an anecdote.** Two hand-runs and two toolkit runs of the same
+  task set on `qwen2.5-coder:7b` produced genuinely different pictures: one
+  showed a dramatic 12-tools-loops / bash-only-passes split, the next showed
+  every menu scoring identically. Run `--repeat` and read the whole matrix
+  before concluding anything about menu size.
+
+**Safety.** This executes shell commands written by a language model. The guard
+in `Sandbox` refuses obvious hazards (`rm`, `sudo`, network tools, absolute
+paths, `../`, redirects outside the working directory) and runs everything in a
+temp directory that is deleted afterwards. That is a seatbelt against
+accidents, **not a security boundary** — a determined model can still do damage.
+Use `--dry-run` to plan without executing, `--read-only` to refuse writes, and
+a container if the model is not one you trust.
+
+Task files describe a directory to set up and the files expected afterwards:
+
+```json
+{
+  "name": "count_and_write",
+  "prompt": "…the task, in the user's voice…",
+  "setup": {"notes.txt": "alpha\nbeta\ngamma\n"},
+  "expect_files": {"result.txt": "3"},
+  "expect_absent": [],
+  "expect_final_contains": ["3"],
+  "max_turns": 8
+}
+```
+
+Use `"*"` as an expected value for "exists and is non-empty". Point
+`--toolbox` at your harness's *real* tool definitions — `cases/agent_tools.json`
+ships a generic coding-agent toolbox so the command works out of the box, but
+the experiment is only as faithful as that file.
 
 ## The shim
 
@@ -282,6 +401,45 @@ python3 -m toolcalldoctor parse --file raw-response.txt --tools my-tools.json
 echo '<tool_call>{"name":"f","arguments":{"a":1,}}</tool_call>' | python3 -m toolcalldoctor parse
 ```
 
+## Keeping the shim running
+
+A harness configured against the shim is dead in the water when the shim is not
+up, so `run_shims.sh` starts it detached and tells you the truth about whether
+it worked:
+
+```bash
+./run_shims.sh start     # start any shim not already running (default)
+./run_shims.sh stop
+./run_shims.sh restart
+./run_shims.sh status
+./run_shims.sh logs
+```
+
+```
+NAME     PORT   STATE   PID     HEALTH  UPSTREAM
+ollama   11500  up      27433   ok      ok
+omlx     11501  up      27454   ok      unreachable
+```
+
+Defaults are Ollama on 11500 (upstream `11434`) and omlx on 11501 (upstream
+`7817`), both in `repair` mode, with traces in `shim-trace.jsonl` and
+`shim-trace-omlx.jsonl`. Override the interpreter, trace directory or startup
+timeout with `PYTHON`, `TRACE_DIR` and `WAIT_SECONDS`.
+
+It is idempotent — `start` leaves an already-running shim alone rather than
+stacking duplicates — and it polls `/health` before reporting success, printing
+the tail of the log if the process died during startup. A dead upstream is a
+warning, not a refusal.
+
+**Run it from your own terminal.** Processes started from an agent session are
+cleaned up when that session ends, so a shim launched on your behalf may not be
+there later. `./run_shims.sh status` is the honest check; if it says `down`,
+just run `start`. The shims do not survive a reboot either.
+
+If you want it running at login, that needs a launchd agent — and on macOS that
+means keeping the code out of `~/Documents`, which launchd agents cannot read.
+See the note in [Layout](#layout) below.
+
 ## Layout
 
 ```
@@ -296,12 +454,45 @@ toolcalldoctor/
   engines.py      per-engine constrained-decoding adapters
   shim.py         the proxy server
   probe.py        dialect probe battery
-  score.py        the scoring harness
+  score.py        single-turn scoring harness
+  agent.py        multi-turn agent loop, sandbox and menu matrix
   cli.py          command line interface
-cases/basic.json          17 human-written cases
+cases/basic.json          17 human-written single-turn cases
+cases/agent_tools.json    generic coding-agent toolbox for `agent`
+cases/agent_tasks.json    multi-turn tasks with file-level expectations
 tests/fake_backend.py     misbehaving backend, one wire format per model name
 tests/data/fake_cases.json  cases matching the fake backend's generator
+run_shims.sh              start/stop/status for the shim processes
 ```
+
+### Running as a launchd service (macOS)
+
+If you want the shim up at login rather than re-running `run_shims.sh` after
+every reboot, macOS makes this awkward when the repo lives in `~/Documents`:
+launchd agents have no TCC access to Documents. The symptom is a silent
+`EX_CONFIG` (78) with completely empty logs, because the failure happens before
+`exec`:
+
+```
+last exit code = 78: EX_CONFIG      # WorkingDirectory inside ~/Documents
+pwd: .: Operation not permitted     # the underlying cause
+```
+
+Measured with four minimal probes: spawning a launchd job is fine, and writing
+a log file into `~/Documents` is fine, but **`chdir` into `~/Documents` is
+denied**. So a working agent needs three things the first attempt got wrong:
+
+1. no `WorkingDirectory` inside `~/Documents`
+2. `StandardOutPath` / `StandardErrorPath` outside it (e.g. `~/Library/Logs/`)
+3. the package installed somewhere launchd can read, with `PYTHONPATH` pointing
+   there — `rsync` the `toolcalldoctor/` directory into
+   `~/Library/Application Support/toolcalldoctor/lib/`
+
+Only `toolcalldoctor/` is needed at runtime; `cases/`, `tests/` and the rest are
+never read by the shim. Note that the installed copy then drifts from your
+working tree. Granting Full Disk Access to `python3` also works but is a much
+broader permission than this problem warrants: it applies to every Python
+script on the machine.
 
 ## Tests
 
@@ -309,17 +500,18 @@ tests/data/fake_cases.json  cases matching the fake backend's generator
 python3 tests/run_all.py        # or: python3 -m toolcalldoctor selftest
 ```
 
-193 tests, no dependencies. The end-to-end tests start a real HTTP backend and
+270 tests, no dependencies. The end-to-end tests start a real HTTP backend and
 a real HTTP shim in-process and assert over the wire, including every dialect,
-streaming, the constrained path, the 422 path, the trace log, and the failure
-modes. Verified on Python 3.12 and 3.14.
+streaming, the constrained path, the 422 path, the trace log, the sandbox
+guard, and the agent matrix. Verified on Python 3.12 and 3.14.
 
 ## Non-goals
 
 - **Not** a model-quality tool. The shim cannot make a model choose the right
   tool; it makes what the model actually said *visible* to your harness. On the
   measured run, accuracy went 18% → 94%, and the remaining 6% was a genuine
-  model error.
+  model error. `agent` *measures* selection quality across menus — it does not
+  improve it.
 - **Not** an Anthropic-API shim. MLX Omni Server's `/anthropic/v1/messages`
   surface is not covered — only the OpenAI `/v1` surface.
 - **Not** a retry loop. There is no "ask the model to fix its JSON" step; every
