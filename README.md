@@ -222,6 +222,43 @@ Use `"*"` as an expected value for "exists and is non-empty". Point
 ships a generic coding-agent toolbox so the command works out of the box, but
 the experiment is only as faithful as that file.
 
+### Capturing a harness's real tool definitions
+
+Don't go reading the harness's source. Schemas are usually generated at
+runtime, so the source is not what goes on the wire. Capture it instead:
+
+```bash
+DUMP_TOOLS=cases/dsh_tools.json ./run_shims.sh restart
+# use your harness normally for one message
+python3 -m toolcalldoctor agent --toolbox cases/dsh_tools.json ...
+```
+
+`--dump-tools` (or the `DUMP_TOOLS` variable) writes the `tools` array from the
+request verbatim, in exactly the shape `--toolbox` expects, and only rewrites
+the file when the tool set actually changes. It records what the harness sent,
+*before* any `--tools-allowlist` trimming, which is what you want for a sizing
+experiment.
+
+For the record, in DSH the tool packages live at
+`dsh/node_modules/@deepseek-ai/dsh-tool-*/lib/index.js` inside
+`/Applications/DeepSeek Harness.app/Contents/Resources/app.asar`, with
+`dsh-tools` as the registry. They are authored like this:
+
+```js
+defineTool({
+  name: "glob",
+  description: `Find files, not directories, ... up to ${caps.maxResults} paths ...`,
+  parameters: { pattern: { type: "string", required: true, description: "..." } },
+});
+```
+
+Note that `required: true` sits *inside* the property, which is not JSON Schema,
+and descriptions are interpolated at runtime. Across all 43 tool-package JS
+files there is not one literal `"properties"`/`"required"` JSON Schema blob:
+`schemastery` converts these to JSON Schema as the request is built. So the
+definition you could copy out of the source is structurally different from the
+one the model receives — which is why the wire capture is the reliable route.
+
 ## The shim
 
 `shim` is an HTTP server. It forwards requests upstream and normalizes what
@@ -500,7 +537,7 @@ script on the machine.
 python3 tests/run_all.py        # or: python3 -m toolcalldoctor selftest
 ```
 
-270 tests, no dependencies. The end-to-end tests start a real HTTP backend and
+275 tests, no dependencies. The end-to-end tests start a real HTTP backend and
 a real HTTP shim in-process and assert over the wire, including every dialect,
 streaming, the constrained path, the 422 path, the trace log, the sandbox
 guard, and the agent matrix. Verified on Python 3.12 and 3.14.

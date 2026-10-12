@@ -23,6 +23,10 @@ PYTHON="${PYTHON:-python3}"
 LOG_DIR="$REPO_DIR/.tmp"
 TRACE_DIR="${TRACE_DIR:-$REPO_DIR}"
 WAIT_SECONDS="${WAIT_SECONDS:-20}"
+# Set DUMP_TOOLS=path to have the ollama shim record the tool definitions your
+# harness sends. Point DSH at the shim, send one message, and the file holds
+# the real toolbox in cases/agent_tools.json format.
+DUMP_TOOLS="${DUMP_TOOLS:-}"
 
 # name|port|upstream base URL|trace file
 SHIMS=(
@@ -54,8 +58,41 @@ shim_healthy() {
   curl -sf --max-time 2 "http://127.0.0.1:$1/health" >/dev/null 2>&1
 }
 
-upstream_ready() { # <upstream base url>
-  curl -sf --max-time 3 "${1%/}/models" >/dev/null 2>&1
+# "ok" | "auth" | "missing" | "down" | HTTP code.
+# A plain `curl -f` cannot tell 401 from connection-refused, and reporting an
+# authenticated server as "unreachable" sends you looking in the wrong place.
+upstream_state() { # <upstream base url>
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "${1%/}/models" 2>/dev/null)"
+  case "$code" in
+    200)       printf 'ok' ;;
+    401|403)   printf 'auth' ;;
+    404)       printf 'missing' ;;
+    000|"")    printf 'down' ;;
+    *)         printf '%s' "$code" ;;
+  esac
+}
+
+# omlx requires a bearer token; read it from its own settings rather than
+# asking anyone to paste a secret. Never printed by this script.
+omlx_api_key() {
+  if [ -n "${OMLX_API_KEY:-}" ]; then printf '%s' "$OMLX_API_KEY"; return 0; fi
+  [ -f "$HOME/.omlx/settings.json" ] || return 0
+  "$PYTHON" - <<'PY' 2>/dev/null
+import json, pathlib
+try:
+    data = json.loads((pathlib.Path.home() / ".omlx" / "settings.json").read_text())
+    print(data.get("auth", {}).get("api_key", "") or "", end="")
+except Exception:
+    pass
+PY
+}
+
+# Bearer token this shim should send upstream, if any.
+upstream_key_for() { # <port> <upstream url>
+  if [ "$1" = "11501" ] || [ "${2#*7817}" != "$2" ]; then
+    omlx_api_key
+  fi
 }
 
 preflight() {
@@ -84,8 +121,30 @@ start_one() { # <name> <port> <upstream> <trace>
     return 0
   fi
 
-  if ! upstream_ready "$upstream"; then
-    dim "  $name: upstream $upstream is not responding (shim will still start)"
+  local state
+  state="$(upstream_state "$upstream")"
+  case "$state" in
+    ok)      : ;;
+    auth)    dim "  $name: upstream $upstream requires an API key (will authenticate if one is found)" ;;
+    missing) dim "  $name: upstream $upstream answered but has no /models at that path" ;;
+    down)    dim "  $name: upstream $upstream is not responding (shim will still start)" ;;
+    *)       dim "  $name: upstream $upstream returned HTTP $state" ;;
+  esac
+
+  # Only the primary shim records tool definitions; the harness talks to it.
+  # The ${arr[@]+...} form keeps `set -u` happy on bash 3.2 with an empty array.
+  local extra_args=()
+  if [ -n "$DUMP_TOOLS" ] && [ "$port" = "11500" ]; then
+    extra_args=(--dump-tools "$DUMP_TOOLS")
+  fi
+
+  local key
+  key="$(upstream_key_for "$port" "$upstream")"
+  if [ -n "$key" ]; then
+    extra_args=(${extra_args[@]+"${extra_args[@]}"} --upstream-api-key "$key")
+  elif [ "$state" = "auth" ]; then
+    warn "  $name: upstream needs a key and none was found; requests will fail with 401"
+    dim "      expected it at $HOME/.omlx/settings.json (auth.api_key), or set OMLX_API_KEY"
   fi
 
   nohup "$PYTHON" -u -m toolcalldoctor shim \
@@ -93,6 +152,7 @@ start_one() { # <name> <port> <upstream> <trace>
     --port "$port" \
     --mode repair \
     --trace "$trace" \
+    ${extra_args[@]+"${extra_args[@]}"} \
     --quiet >>"$log" 2>&1 &
   local pid=$!
   printf '%s\n' "$pid" >"$pidfile"
@@ -101,7 +161,7 @@ start_one() { # <name> <port> <upstream> <trace>
   while [ "$i" -lt "$WAIT_SECONDS" ]; do
     if shim_healthy "$port"; then
       ok "  $name (port $port): up, pid $pid"
-      dim "      upstream $upstream"
+      dim "      upstream $upstream${key:+ (authenticated)}"
       dim "      trace    $trace"
       return 0
     fi
@@ -166,15 +226,22 @@ cmd_stop() {
 }
 
 cmd_status() {
-  printf '%-8s %-6s %-10s %-8s %-9s %s\n' NAME PORT STATE PID HEALTH UPSTREAM
-  local s name port upstream state pid health up
+  printf '%-8s %-6s %-8s %-8s %-8s %s\n' NAME PORT SHIM PID HEALTH UPSTREAM
+  local s name port upstream state pid health up key
   for s in "${SHIMS[@]}"; do
     name="$(field 1 "$s")"; port="$(field 2 "$s")"; upstream="$(field 3 "$s")"
     pid="$(pid_on_port "$port")"
     if [ -n "$pid" ]; then state="up"; else state="down"; pid="-"; fi
     if shim_healthy "$port"; then health="ok"; else health="-"; fi
-    if upstream_ready "$upstream"; then up="ok"; else up="unreachable"; fi
-    printf '%-8s %-6s %-10s %-8s %-9s %s\n' "$name" "$port" "$state" "$pid" "$health" "$up"
+    key="$(upstream_key_for "$port" "$upstream")"
+    case "$(upstream_state "$upstream")" in
+      ok)      up="ok" ;;
+      auth)    if [ -n "$key" ]; then up="ok (auth)"; else up="needs API key"; fi ;;
+      missing) up="no /models" ;;
+      down)    up="unreachable" ;;
+      *)       up="HTTP $up" ;;
+    esac
+    printf '%-8s %-6s %-8s %-8s %-8s %s\n' "$name" "$port" "$state" "$pid" "$health" "$up"
   done
   return 0
 }
@@ -206,6 +273,10 @@ Configuration (environment variables):
   PYTHON         interpreter to use            (default: python3)
   TRACE_DIR      where trace JSONL files go    (default: this directory)
   WAIT_SECONDS   startup health-check timeout  (default: 20)
+  DUMP_TOOLS     file to record the tool definitions your harness sends, e.g.
+                 DUMP_TOOLS=cases/dsh_tools.json ./run_shims.sh restart
+                 Then send one message from the harness and the file holds its
+                 real toolbox, ready to use as --toolbox for `agent`.
 
 The shims run detached, so closing the terminal does not kill them. They do not
 survive a reboot; run `start` again after one. Traces are written to

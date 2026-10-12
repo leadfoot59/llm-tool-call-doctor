@@ -19,12 +19,14 @@ that is the trade this shim makes, deliberately.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 from .client import EndpointError, OpenAIEndpoint
@@ -63,6 +65,11 @@ class ShimConfig:
     # Attach a "_toolcalldoctor" diagnostic block to responses. Off by default
     # because some strictly-typed clients reject unknown top-level fields.
     include_meta: bool = False
+    # Write the tool definitions a harness sends to this file, verbatim. This is
+    # the authoritative way to capture a harness's real toolbox: schemas are
+    # usually generated at runtime, so reading the harness's source is not the
+    # same as seeing what it puts on the wire.
+    dump_tools: str | None = None
 
     def options(self) -> Options:
         return Options(
@@ -480,6 +487,11 @@ def stream_response_bytes(
 # HTTP layer
 # --------------------------------------------------------------------------
 
+# Digest of the last tool set written per dump path, so a long agent session
+# does not rewrite an identical file on every single request.
+_DUMP_STATE: dict[str, str] = {}
+_DUMP_LOCK = threading.Lock()
+
 
 class ShimHandler(BaseHTTPRequestHandler):
     server_version = "toolcalldoctor-shim/0.1"
@@ -587,6 +599,32 @@ class ShimHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # never take the shim down
             self._send_json(500, {"error": {"message": f"shim failure: {exc!r}"}})
 
+    def _maybe_dump_tools(self, body: dict[str, Any]) -> str | None:
+        """Save the tool definitions from this request, verbatim.
+
+        Called with the *raw* request body, before any allowlist trimming, so
+        the file shows what the harness really sends.
+        """
+        path = self.config.dump_tools
+        if not path:
+            return None
+        tools = body.get("tools")
+        if not isinstance(tools, list) or not tools:
+            return None  # e.g. a title-generation call with no tools
+        payload = json.dumps({"tools": tools}, indent=2, ensure_ascii=False) + "\n"
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        with _DUMP_LOCK:
+            if _DUMP_STATE.get(path) == digest:
+                return None
+            try:
+                target = Path(path).expanduser()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(payload, encoding="utf-8")
+            except OSError as exc:
+                return f"could not write tool dump to {path}: {exc}"
+            _DUMP_STATE[path] = digest
+        return f"dumped {len(tools)} tool definition(s) to {path}"
+
     def _handle_chat(self, body: dict[str, Any]) -> None:
         started = time.time()
         config = self.config
@@ -599,7 +637,10 @@ class ShimHandler(BaseHTTPRequestHandler):
         wants_stream = bool(body.get("stream"))
         model = str(body.get("model") or "")
 
+        dump_note = self._maybe_dump_tools(body)
         prepared, prep_notes = prepare_request(body, tools, config, self.profile)
+        if dump_note:
+            prep_notes.append(dump_note)
         endpoint = self._endpoint()
 
         if config.stream_mode == "passthrough" or config.mode == "passthrough":

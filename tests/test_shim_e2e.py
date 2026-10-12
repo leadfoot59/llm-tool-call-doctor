@@ -470,6 +470,105 @@ class TestToolTrimming(unittest.TestCase):
         self.assertEqual(warnings, [])
 
 
+class TestToolDump(unittest.TestCase):
+    """Capturing a harness's real toolbox off the wire."""
+
+    def test_dumps_the_exact_tools_received(self):
+        backend = start_fake_backend()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "captured.json"
+            shim = start_shim(backend.base_url, dump_tools=str(target))
+            try:
+                post_json(f"{shim.base_url}/chat/completions", payload("fake/hermes"))
+                data = json.loads(target.read_text())
+                self.assertIn("tools", data)
+                self.assertEqual(len(data["tools"]), 1)
+                self.assertEqual(data["tools"][0]["function"]["name"], "get_weather")
+                # Verbatim, so it can be dropped straight into a case file.
+                self.assertIn("parameters", data["tools"][0]["function"])
+            finally:
+                shim.stop()
+                backend.stop()
+
+    def test_dump_records_tools_before_allowlist_trimming(self):
+        backend = start_fake_backend()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "captured.json"
+            shim = start_shim(
+                backend.base_url,
+                dump_tools=str(target),
+                tools_allowlist=["get_weather"],
+            )
+            try:
+                tools = [WEATHER, *TestToolTrimming.EXTRA]
+                post_json(
+                    f"{shim.base_url}/chat/completions",
+                    payload("fake/hermes", tools=tools),
+                )
+                data = json.loads(target.read_text())
+                # The harness sent 3; the model saw 1. The dump is the former.
+                self.assertEqual(len(data["tools"]), 3)
+            finally:
+                shim.stop()
+                backend.stop()
+
+    def test_requests_without_tools_do_not_overwrite(self):
+        backend = start_fake_backend()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "captured.json"
+            shim = start_shim(backend.base_url, dump_tools=str(target))
+            try:
+                post_json(f"{shim.base_url}/chat/completions", payload("fake/hermes"))
+                first = target.read_text()
+                # A title-generation style call: no tools at all.
+                post_json(
+                    f"{shim.base_url}/chat/completions",
+                    {
+                        "model": "fake/nofmt",
+                        "messages": [{"role": "user", "content": "make a title"}],
+                    },
+                )
+                self.assertEqual(target.read_text(), first)
+            finally:
+                shim.stop()
+                backend.stop()
+
+    def test_identical_tool_set_is_recorded_once(self):
+        from toolcalldoctor.shim import _DUMP_STATE
+
+        backend = start_fake_backend()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "captured.json"
+            _DUMP_STATE.pop(str(target), None)
+            shim = start_shim(backend.base_url, dump_tools=str(target))
+            try:
+                for _ in range(3):
+                    post_json(
+                        f"{shim.base_url}/chat/completions", payload("fake/hermes")
+                    )
+                self.assertIn(str(target), _DUMP_STATE)
+            finally:
+                shim.stop()
+                backend.stop()
+                _DUMP_STATE.pop(str(target), None)
+
+    def test_unwritable_dump_path_is_not_fatal(self):
+        backend = start_fake_backend()
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "blocked" / "x.json"
+            (Path(tmp) / "blocked").write_text("not a directory")
+            shim = start_shim(backend.base_url, dump_tools=str(bad))
+            try:
+                # The request still succeeds; the shim just cannot save the dump.
+                response = post_json(
+                    f"{shim.base_url}/chat/completions", payload("fake/hermes")
+                )
+                self.assertTrue(response["choices"][0]["message"].get("tool_calls"))
+            finally:
+                shim.stop()
+                backend.stop()
+
+
 class TestFailureModes(unittest.TestCase):
     def test_on_parse_failure_error_returns_422_for_a_mangled_attempt(self):
         backend = start_fake_backend()

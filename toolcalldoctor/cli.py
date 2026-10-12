@@ -114,6 +114,7 @@ def cmd_shim(args: argparse.Namespace) -> int:
         engine=args.engine,
         timeout=args.timeout,
         trace=args.trace,
+        dump_tools=args.dump_tools,
         quiet=args.quiet,
         include_meta=args.meta,
     )
@@ -460,6 +461,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="error: return HTTP 422 instead of silently passing raw text through",
     )
     p_shim.add_argument("--trace", help="append a JSONL trace of every request here")
+    p_shim.add_argument(
+        "--dump-tools",
+        metavar="FILE",
+        help="save the tool definitions your harness sends to this file, verbatim, "
+        "in the same shape as cases/agent_tools.json. The authoritative way to "
+        "capture a harness's real toolbox: schemas are usually generated at "
+        "runtime, so reading its source is not the same as what it sends.",
+    )
     p_shim.add_argument("--meta", action="store_true", help="add a _toolcalldoctor block to responses")
     p_shim.add_argument("--quiet", action="store_true", help="suppress access logging")
     p_shim.add_argument("--engine", default="auto", choices=["auto", *engine_names()])
