@@ -189,6 +189,16 @@ Two methodology notes, both learned by running this against a real model:
   reasonably delegated to it failed through no fault of its own, and menu size
   looked like the culprit when it was not. The shipped toolbox now lists only
   tools the simulator can run, and there is a test asserting that.
+- **The simulated tools must match your harness's semantics exactly.** An
+  early version of the sandbox `read` treated `offset` as a 0-based index, while
+  the real tool documents it as "1-based first line to return", and it returned
+  raw text where the real one returns line-numbered content plus an end-of-file
+  footer. A model reading a three-line file was shown two lines, answered `2`,
+  and was recorded as a model failure. It was not one. `read` now reproduces
+  DSH's envelope literally -- `<path>..</path> <type>file</type> <content>
+  1: alpha ... (End of file - total 3 lines) </content>` -- including the
+  out-of-range error. Before believing a failure, check that the tool the model
+  called behaves the way your harness's tool does.
 - **One run is an anecdote.** Two hand-runs and two toolkit runs of the same
   task set on `qwen2.5-coder:7b` produced genuinely different pictures: one
   showed a dramatic 12-tools-loops / bash-only-passes split, the next showed
@@ -537,7 +547,7 @@ script on the machine.
 python3 tests/run_all.py        # or: python3 -m toolcalldoctor selftest
 ```
 
-275 tests, no dependencies. The end-to-end tests start a real HTTP backend and
+293 tests, no dependencies. The end-to-end tests start a real HTTP backend and
 a real HTTP shim in-process and assert over the wire, including every dialect,
 streaming, the constrained path, the 422 path, the trace log, the sandbox
 guard, and the agent matrix. Verified on Python 3.12 and 3.14.

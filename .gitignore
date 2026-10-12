@@ -10,3 +10,9 @@ venv/
 *.jsonl
 .pytest_cache/
 .DS_Store
+
+# Tool definitions captured from a harness by `shim --dump-tools`. Regenerable
+# with one harness message, specific to the harness version and preset, and
+# someone else's product text -- so it stays out of the published repo while
+# remaining on disk for local `agent --toolbox` runs.
+cases/dsh_tools.json

@@ -14,6 +14,7 @@ for extra in (str(ROOT), str(ROOT / "tests")):
 
 from helpers import start_fake_backend  # noqa: E402
 from toolcalldoctor.agent import (  # noqa: E402
+    RunResult,
     Sandbox,
     Task,
     TaskError,
@@ -27,6 +28,7 @@ from toolcalldoctor.agent import (  # noqa: E402
     run_matrix,
 )
 from toolcalldoctor.client import OpenAIEndpoint  # noqa: E402
+from toolcalldoctor.types import ToolSpec  # noqa: E402
 
 TOOLBOX = ROOT / "cases" / "agent_tools.json"
 TASKS = ROOT / "cases" / "agent_tasks.json"
@@ -174,6 +176,45 @@ class TestSandbox(unittest.TestCase):
         self.assertEqual(status, "ok")
         self.assertIn("alpha", output)
 
+    def test_read_is_one_based_and_line_numbered(self):
+        # offset is "1-based first line to return", as in the real harness.
+        status, output = self.sandbox.run(
+            "read", {"file_path": "notes.txt", "offset": 1, "limit": 2000}
+        )
+        self.assertEqual(status, "ok")
+        self.assertIn("1: alpha", output)
+        self.assertIn("2: beta", output)
+        self.assertIn("3: gamma", output)
+        self.assertIn("(End of file - total 3 lines)", output)
+
+    def test_read_offset_two_keeps_numbering_absolute(self):
+        status, output = self.sandbox.run("read", {"file_path": "notes.txt", "offset": 2})
+        self.assertEqual(status, "ok")
+        self.assertNotIn("1: alpha", output)
+        self.assertIn("2: beta", output)
+        self.assertIn("3: gamma", output)
+
+    def test_read_limit_reports_continuation(self):
+        status, output = self.sandbox.run(
+            "read", {"file_path": "notes.txt", "offset": 1, "limit": 2}
+        )
+        self.assertEqual(status, "ok")
+        self.assertIn("1: alpha", output)
+        self.assertIn("2: beta", output)
+        self.assertNotIn("gamma", output)
+        self.assertIn("Showing lines 1-2 of 3", output)
+        self.assertIn("Use offset=3 to continue", output)
+
+    def test_read_offset_out_of_range_is_an_error(self):
+        status, output = self.sandbox.run("read", {"file_path": "notes.txt", "offset": 99})
+        self.assertEqual(status, "error")
+        self.assertIn("out of range", output)
+
+    def test_read_trailing_newline_is_not_an_extra_line(self):
+        status, output = self.sandbox.run("read", {"file_path": "notes.txt", "offset": 1})
+        self.assertEqual(status, "ok")
+        self.assertIn("total 3 lines", output)
+
     def test_read_refuses_a_glob_like_a_real_harness(self):
         status, output = self.sandbox.run("read", {"file_path": "./*"})
         self.assertEqual(status, "error")
@@ -320,11 +361,14 @@ class TestAgentMatrix(AgentMatrixTestCase):
         self.assertEqual(by_key[("answer_no_tool", "read,list_dir")], "passed")
         self.assertEqual(by_key[("count_markdown_files", "read,list_dir")], "passed")
 
-    def test_recommendation_is_the_smallest_menu_that_passes(self):
-        results = self.matrix("fake/agent_good", ["all", "bash", "read,list_dir"])
+    def test_no_trimming_advice_when_the_full_menu_also_passes(self):
+        # all and bash both work: trimming is not *required*, and saying
+        # "trim to bash" here would contradict the table above it.
+        results = self.matrix("fake/agent_good", ["all", "bash"])
         verdict = recommend(results, self.toolbox)
-        self.assertIn("smallest menu that passes everything", verdict)
-        self.assertIn("bash", verdict)
+        self.assertIn("Trimming is not required", verdict)
+        self.assertNotIn("smallest menu that achieves everything", verdict)
+        self.assertNotIn("Trim to that", verdict)
 
     def test_no_menu_passes_all_is_reported_honestly(self):
         results = self.matrix("fake/agent_good", ["read,list_dir"])
@@ -489,6 +533,60 @@ class TestAgentMatrix(AgentMatrixTestCase):
         text = format_matrix(results, show_transcript="count_and_write")
         self.assertIn("transcript for count_and_write", text)
         self.assertIn("turn 1", text)
+
+
+class TestRecommendationLogic(unittest.TestCase):
+    """The verdict is decided by the numbers, not by the backend.
+
+    A scripted agent that passes everywhere cannot exercise the "full menu
+    fails, a small one works" branch, so these build results directly.
+    """
+
+    TOOLBOX = [ToolSpec(n, "", {"type": "object"}) for n in ("bash", "read", "write")]
+
+    def ok(self, task, menu):
+        r = RunResult(task=task, menu=menu, outcome="passed", turns=2, tool_calls=1)
+        r.expectations_checked = True
+        return r
+
+    def bad(self, task, menu):
+        r = RunResult(task=task, menu=menu, outcome="failed", turns=2, tool_calls=0)
+        r.expectations_checked = True
+        r.violations = ["did not do the thing"]
+        return r
+
+    def test_smallest_winning_menu_is_named_when_the_full_menu_fails(self):
+        results = [
+            self.bad("t1", "all"),
+            self.bad("t2", "all"),
+            self.ok("t1", "bash"),
+            self.ok("t2", "bash"),
+        ]
+        verdict = recommend(results, self.TOOLBOX)
+        self.assertIn("smallest menu that achieves everything", verdict)
+        self.assertIn("Trim to that", verdict)
+
+    def test_full_menu_passing_suppresses_trimming_advice(self):
+        results = [
+            self.ok("t1", "all"),
+            self.ok("t2", "all"),
+            self.ok("t1", "bash"),
+            self.ok("t2", "bash"),
+        ]
+        verdict = recommend(results, self.TOOLBOX)
+        self.assertIn("Trimming is not required", verdict)
+        self.assertNotIn("Trim to that", verdict)
+
+    def test_falls_back_to_the_best_menu_when_none_achieves_everything(self):
+        results = [
+            self.ok("t1", "all"),
+            self.bad("t2", "all"),
+            self.ok("t1", "bash"),
+            self.bad("t2", "bash"),
+        ]
+        verdict = recommend(results, self.TOOLBOX)
+        self.assertIn("no menu achieved every task", verdict)
+        self.assertIn("limit is the model", verdict)
 
 
 class TestTransportFailure(unittest.TestCase):

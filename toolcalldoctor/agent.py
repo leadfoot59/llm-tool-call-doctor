@@ -219,6 +219,15 @@ class Sandbox:
     # -- file tools --------------------------------------------------------
 
     def _t_read(self, args: dict[str, Any]) -> tuple[str, str]:
+        """Read a file the way the harness's own read tool does.
+
+        Matched to DSH's implementation, because getting this subtly wrong
+        fabricates model failures. `offset` is 1-based ("1-based first line to
+        return"), `limit` caps the window, the content is line-numbered, and the
+        envelope carries an end-of-file or continuation footer. Treating
+        `offset` as a 0-based index silently dropped the first line, and a model
+        counting the lines of a three-line file duly answered 2.
+        """
         raw = str(args.get("file_path") or "")
         if not raw:
             return "error", "no file_path given"
@@ -228,15 +237,42 @@ class Sandbox:
         path = self._path(raw)
         if not path.is_file():
             return "error", f'cannot read "{path}": not found'
-        text = path.read_text(errors="replace")
-        offset = args.get("offset")
-        limit = args.get("limit")
-        if isinstance(offset, int) or isinstance(limit, int):
-            lines = text.splitlines()
-            start = int(offset) if isinstance(offset, int) else 0
-            end = start + int(limit) if isinstance(limit, int) else len(lines)
-            text = "\n".join(lines[start:end])
-        return "ok", text
+
+        def whole(value: Any, default: int) -> int:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return default
+            return int(value)
+
+        offset = max(1, whole(args.get("offset"), 1))
+        limit = max(0, whole(args.get("limit"), 2000))
+
+        # One line per newline, and a trailing newline is not an extra line.
+        lines = path.read_text(errors="replace").split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        total = len(lines)
+
+        if offset > total and not (total == 0 and offset == 1):
+            return "error", (
+                f'offset {offset} is out of range for "{raw}" ({total} lines)'
+            )
+
+        window = lines[offset - 1 : offset - 1 + limit]
+        numbered = "\n".join(
+            f"{offset + index}: {text}" for index, text in enumerate(window)
+        )
+        end_line = offset - 1 + len(window)
+        if window and end_line < total:
+            footer = (
+                f"(Showing lines {offset}-{end_line} of {total}. "
+                f"Use offset={end_line + 1} to continue.)"
+            )
+        else:
+            footer = f"(End of file - total {total} lines)"
+        body = f"{numbered}\n\n{footer}" if window else footer
+        return "ok", (
+            f"<path>{raw}</path> <type>file</type> <content> {body} </content>"
+        )
 
     def _t_write(self, args: dict[str, Any]) -> tuple[str, str]:
         if self.read_only:
@@ -769,25 +805,32 @@ def recommend(results: list[RunResult], toolbox: list[ToolSpec]) -> str:
         roster.append((label, size, passed))
 
     winners = [item for item in roster if item[2] >= total_tasks]
+    # "Did the full tool set also work?" is the question that decides whether
+    # trimming is *required*, and it has to be asked by label: only the "all"
+    # menu is the full set, whatever its size happens to be.
+    full_ok = any(label == "all" and passed >= total_tasks for label, _, passed in roster)
+
     lines = ["  menu comparison (advertised tools -> tasks achieved):"]
     for label, size, passed in sorted(roster, key=lambda item: item[1]):
-        mark = "  <-- smallest menu that passes everything" if (
-            winners and (label, size, passed) == min(winners, key=lambda i: i[1])
-        ) else ""
+        mark = ""
+        if winners and not full_ok and (label, size, passed) == min(
+            winners, key=lambda i: i[1]
+        ):
+            mark = "  <-- smallest menu that achieves everything"
         lines.append(f"    {size:>2} tools  {label:<28} {passed}/{total_tasks}{mark}")
 
-    if winners:
+    if winners and full_ok:
+        lines.append(
+            "  => every menu achieved every task, including the full one. "
+            "Trimming is not required here; use it only if a smaller menu "
+            "also cuts turns."
+        )
+    elif winners:
         best = min(winners, key=lambda item: item[1])
-        if best[1] >= len(toolbox):
-            lines.append(
-                "  => every menu passed, including the full one. Trimming is not "
-                "required for these tasks; use it only if it reduces turns."
-            )
-        else:
-            lines.append(
-                f"  => `{best[0]}` ({best[1]} tools) passed every task. Trim to that, "
-                "not to a fixed two-tool set."
-            )
+        lines.append(
+            f"  => `{best[0]}` ({best[1]} tools) achieved every task while the full "
+            "menu did not. Trim to that, not to a fixed two-tool set."
+        )
     else:
         biggest = max(roster, key=lambda item: item[2])
         lines.append(
