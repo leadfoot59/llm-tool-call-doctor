@@ -552,6 +552,73 @@ class TestToolDump(unittest.TestCase):
                 backend.stop()
                 _DUMP_STATE.pop(str(target), None)
 
+    def test_dump_accumulates_and_never_shrinks(self):
+        # A request with a smaller tool set (a subagent, or an `agent --toolbox`
+        # run) must not destroy a capture that is already there.
+        backend = start_fake_backend()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "captured.json"
+            shim = start_shim(backend.base_url, dump_tools=str(target))
+            try:
+                extra = {
+                    "type": "function",
+                    "function": {
+                        "name": "search_docs",
+                        "description": "Search",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+                post_json(
+                    f"{shim.base_url}/chat/completions",
+                    payload("fake/hermes", tools=[WEATHER, extra]),
+                )
+                self.assertEqual(len(json.loads(target.read_text())["tools"]), 2)
+
+                # Now a request carrying a strict subset.
+                post_json(
+                    f"{shim.base_url}/chat/completions",
+                    payload("fake/hermes", tools=[WEATHER]),
+                )
+                names = [
+                    t["function"]["name"]
+                    for t in json.loads(target.read_text())["tools"]
+                ]
+                self.assertEqual(sorted(names), ["get_weather", "search_docs"])
+            finally:
+                shim.stop()
+                backend.stop()
+
+    def test_dump_adds_a_tool_from_a_later_request(self):
+        backend = start_fake_backend()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "captured.json"
+            shim = start_shim(backend.base_url, dump_tools=str(target))
+            try:
+                post_json(
+                    f"{shim.base_url}/chat/completions",
+                    payload("fake/hermes", tools=[WEATHER]),
+                )
+                other = {
+                    "type": "function",
+                    "function": {
+                        "name": "list_dir",
+                        "description": "List",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+                post_json(
+                    f"{shim.base_url}/chat/completions",
+                    payload("fake/hermes", tools=[other]),
+                )
+                names = [
+                    t["function"]["name"]
+                    for t in json.loads(target.read_text())["tools"]
+                ]
+                self.assertEqual(sorted(names), ["get_weather", "list_dir"])
+            finally:
+                shim.stop()
+                backend.stop()
+
     def test_dump_leaves_no_staging_file_behind(self):
         # Two shims can share one dump path, so the write is a temp-file rename.
         backend = start_fake_backend()

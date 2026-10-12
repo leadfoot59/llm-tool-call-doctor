@@ -601,10 +601,15 @@ class ShimHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": {"message": f"shim failure: {exc!r}"}})
 
     def _maybe_dump_tools(self, body: dict[str, Any]) -> str | None:
-        """Save the tool definitions from this request, verbatim.
+        """Save the tool definitions from this request, accumulating by name.
 
         Called with the *raw* request body, before any allowlist trimming, so
         the file shows what the harness really sends.
+
+        Definitions accumulate rather than being replaced. A request carrying a
+        smaller set -- a subagent, a title call, or an `agent --toolbox` run --
+        must not shrink a capture that is already there. Delete the file to
+        start over.
         """
         path = self.config.dump_tools
         if not path:
@@ -612,13 +617,45 @@ class ShimHandler(BaseHTTPRequestHandler):
         tools = body.get("tools")
         if not isinstance(tools, list) or not tools:
             return None  # e.g. a title-generation call with no tools
-        payload = json.dumps({"tools": tools}, indent=2, ensure_ascii=False) + "\n"
+
+        def tool_name(item: Any) -> str | None:
+            if not isinstance(item, dict):
+                return None
+            fn = item.get("function")
+            if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+                return fn["name"]
+            return None
+
+        target = Path(path).expanduser()
+        merged: dict[str, Any] = {}
+        if target.is_file():
+            try:
+                prior = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                prior = {}
+            for item in prior.get("tools") or []:
+                name = tool_name(item)
+                if name:
+                    merged[name] = item
+
+        added = 0
+        for item in tools:
+            name = tool_name(item)
+            if not name:
+                continue
+            if name not in merged:
+                added += 1
+            merged[name] = item
+
+        payload = (
+            json.dumps({"tools": list(merged.values())}, indent=2, ensure_ascii=False)
+            + "\n"
+        )
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         with _DUMP_LOCK:
             if _DUMP_STATE.get(path) == digest:
                 return None
             try:
-                target = Path(path).expanduser()
                 target.parent.mkdir(parents=True, exist_ok=True)
                 # Write via a temp file and rename, so two shims pointed at the
                 # same dump path can never interleave a half-written file.
@@ -628,7 +665,7 @@ class ShimHandler(BaseHTTPRequestHandler):
             except OSError as exc:
                 return f"could not write tool dump to {path}: {exc}"
             _DUMP_STATE[path] = digest
-        return f"dumped {len(tools)} tool definition(s) to {path}"
+        return f"tool dump {path}: {len(merged)} tool(s) total, {added} new"
 
     def _handle_chat(self, body: dict[str, Any]) -> None:
         started = time.time()
@@ -777,6 +814,11 @@ class ShimHandler(BaseHTTPRequestHandler):
             return [], result, "no_tools"
         content = message.get("content")
         text = content if isinstance(content, str) else ""
+        if result.errors:
+            # The model did call a tool; we refused it. Reporting this as an
+            # empty response sends you looking for a model problem instead of
+            # the name-matching one recorded in `errors`.
+            return [], result, "rejected"
         if not text.strip():
             # A completely empty completion. Not a malformed call, so it must
             # not trip --on-parse-failure error, but it is worth seeing in the

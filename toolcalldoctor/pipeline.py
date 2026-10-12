@@ -8,6 +8,7 @@ precise, structured reason why not. No model is invoked, ever.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -70,19 +71,58 @@ class Options:
     native_only: bool = False
 
 
+# Model control tokens that leak into tool names when a chat template and a
+# model's native framing disagree. gpt-oss (Harmony) is the common offender:
+# it produces "bash<|channel|>commentary" and "readjson<|channel|>commentary".
+_SPECIAL_TOKEN_RE = re.compile(r"<\|[^|>]*\|>")
+
+
 def _match_tool(name: str, by_name: dict[str, ToolSpec]) -> tuple[str | None, str | None]:
-    """Resolve a model-emitted name to a real tool. Returns (resolved, note)."""
+    """Resolve a model-emitted name to a real tool. Returns (resolved, note).
+
+    Tries, in order: the name as-is; case-insensitively; without surrounding
+    quotes/whitespace; without a model control-token suffix or prefix; and
+    finally an *unambiguous* prefix match. Every repair is reported, never
+    silent.
+    """
     if name in by_name:
         return name, None
-    lowered = {k.lower(): k for k in by_name}
+    lowered = {key.lower(): key for key in by_name}
     if name.lower() in lowered:
-        return lowered[name.lower()], f"tool name case-fixed {name!r} -> {lowered[name.lower()]!r}"
+        target = lowered[name.lower()]
+        return target, f"tool name case-fixed {name!r} -> {target!r}"
+
     stripped = name.strip().strip("\"'`")
-    if stripped in by_name:
+    if stripped and stripped != name and stripped in by_name:
         return stripped, f"tool name stripped of quotes/space -> {stripped!r}"
-    if stripped.lower() in lowered:
-        target = lowered[stripped.lower()]
-        return target, f"tool name normalized {name!r} -> {target!r}"
+
+    base = stripped or name
+
+    # gpt-oss (Harmony) puts the channel *after* the name, so the token and the
+    # channel word both have to go: "bash<|channel|>commentary" -> "bash".
+    tail = base.split("<|", 1)[0].strip()
+    if tail and tail != base:
+        target = tail if tail in by_name else lowered.get(tail.lower())
+        if target:
+            return target, f"dropped control-token suffix from tool name {name!r} -> {target!r}"
+
+    # Other templates prefix the token instead: "<|channel|>bash" -> "bash".
+    cleaned = _SPECIAL_TOKEN_RE.sub("", base).strip()
+    if cleaned and cleaned != base:
+        target = cleaned if cleaned in by_name else lowered.get(cleaned.lower())
+        if target:
+            return target, f"stripped model control tokens from tool name {name!r} -> {target!r}"
+
+    # Unambiguous prefix: only when exactly one known tool is a prefix, so a
+    # genuinely unknown name is still rejected rather than guessed at.
+    for candidate in (cleaned, tail, base):
+        if not candidate:
+            continue
+        low = candidate.lower()
+        hits = [real for key, real in lowered.items() if low.startswith(key) and low != key]
+        if len(hits) == 1:
+            return hits[0], f"tool name prefix-matched {name!r} -> {hits[0]!r}"
+
     return None, None
 
 

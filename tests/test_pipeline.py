@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -131,6 +132,78 @@ class TestNameHandling(unittest.TestCase):
         result = parse_text('{"arguments": {"city": "Paris"}}', [])
         self.assertFalse(result.ok)
         self.assertTrue(any("no name" in e for e in result.errors))
+
+
+class TestToolNameRepair(unittest.TestCase):
+    """gpt-oss leaks Harmony channel tokens into the function name."""
+
+    def setUp(self):
+        self.tools = [
+            ToolSpec(name, "", {"type": "object"})
+            for name in ("bash", "read", "read_image", "edit", "search")
+        ]
+
+    def parse(self, name: str, tools=None):
+        text = json.dumps({"name": name, "arguments": {"file_path": "x"}})
+        return parse_text(text, tools or self.tools)
+
+    def test_drops_channel_suffix(self):
+        result = self.parse("bash<|channel|>commentary")
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.calls[0].name, "bash")
+        self.assertTrue(
+            any("control-token suffix" in r for r in result.calls[0].repairs),
+            result.calls[0].repairs,
+        )
+
+    def test_drops_channel_prefix(self):
+        result = self.parse("<|channel|>bash")
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.calls[0].name, "bash")
+
+    def test_prefix_match_recovers_concatenated_name(self):
+        result = self.parse("readjson<|channel|>commentary")
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.calls[0].name, "read")
+        self.assertTrue(
+            any("prefix-matched" in r for r in result.calls[0].repairs),
+            result.calls[0].repairs,
+        )
+
+    def test_prefix_match_does_not_steal_a_sibling_tool(self):
+        # read_image must never be rewritten to read.
+        result = self.parse("read_image")
+        self.assertEqual(result.calls[0].name, "read_image")
+        self.assertEqual(result.calls[0].repairs, [])
+
+    def test_ambiguous_prefix_is_refused(self):
+        # Both read and read_image are prefixes, so neither may be guessed.
+        result = self.parse("read_image_extra")
+        self.assertFalse(result.ok)
+        self.assertTrue(any("unknown tool" in e for e in result.errors))
+
+    def test_genuinely_unknown_name_is_still_rejected(self):
+        result = self.parse("delete_everything")
+        self.assertFalse(result.ok)
+        self.assertTrue(any("unknown tool" in e for e in result.errors))
+
+    def test_native_call_with_channel_token_is_repaired(self):
+        message = {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "x",
+                    "function": {
+                        "name": "bash<|channel|>commentary",
+                        "arguments": '{"command": "ls"}',
+                    },
+                }
+            ],
+        }
+        result = parse_message(message, self.tools)
+        self.assertTrue(result.ok, result.errors)
+        self.assertEqual(result.calls[0].name, "bash")
+        self.assertEqual(result.calls[0].arguments, {"command": "ls"})
 
 
 class TestArgumentHandling(unittest.TestCase):

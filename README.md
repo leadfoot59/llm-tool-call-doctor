@@ -233,11 +233,11 @@ DUMP_TOOLS=cases/dsh_tools.json ./run_shims.sh restart
 python3 -m toolcalldoctor agent --toolbox cases/dsh_tools.json ...
 ```
 
-`--dump-tools` (or the `DUMP_TOOLS` variable) writes the `tools` array from the
-request verbatim, in exactly the shape `--toolbox` expects, and only rewrites
-the file when the tool set actually changes. It records what the harness sent,
-*before* any `--tools-allowlist` trimming, which is what you want for a sizing
-experiment.
+`--dump-tools` (or the `DUMP_TOOLS` variable) records the `tools` array from each
+request, in exactly the shape `--toolbox` expects, *before* any
+`--tools-allowlist` trimming. Definitions accumulate by name: a request carrying
+a **smaller** set — a subagent, a title call, or your own `agent --toolbox` run —
+never shrinks a capture you already have. Delete the file to start over.
 
 For the record, in DSH the tool packages live at
 `dsh/node_modules/@deepseek-ai/dsh-tool-*/lib/index.js` inside
