@@ -1,0 +1,119 @@
+{
+  "_comment": "Cases whose expectations match tests/fake_backend.py's deterministic answer generator. Use these to verify the shim end to end without a real model: the ONLY variable is the wire format, selected via --model fake/<dialect>.",
+  "_usage": "python3 tests/fake_backend.py --port 11888 &  then:  python3 -m toolcalldoctor score --cases tests/data/fake_cases.json --model fake/hermes --base-url http://127.0.0.1:11500/v1 --baseline-url http://127.0.0.1:11888/v1",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the weather for a city.",
+        "parameters": {
+          "type": "object",
+          "required": ["city"],
+          "properties": {
+            "city": { "type": "string" },
+            "units": { "type": "string", "enum": ["metric", "imperial"] },
+            "days": { "type": "integer" }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_docs",
+        "description": "Search the documentation.",
+        "parameters": {
+          "type": "object",
+          "required": ["query"],
+          "properties": {
+            "query": { "type": "string" },
+            "limit": { "type": "integer" }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "book_trip",
+        "description": "Book travel for a traveller.",
+        "parameters": {
+          "type": "object",
+          "required": ["destination"],
+          "properties": {
+            "destination": { "type": "string" },
+            "traveller": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "age": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "send_email",
+        "description": "Send an email.",
+        "parameters": {
+          "type": "object",
+          "required": ["to", "subject"],
+          "properties": {
+            "to": { "type": "string" },
+            "subject": { "type": "string" }
+          }
+        }
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "fake_weather",
+      "tags": ["format"],
+      "tools": ["get_weather"],
+      "prompt": "What is the weather in Paris? Use metric units for 3 days.",
+      "expect": {
+        "tool": "get_weather",
+        "args": { "city": "Paris", "units": "metric", "days": 3 }
+      }
+    },
+    {
+      "name": "fake_search",
+      "tags": ["format", "numbers"],
+      "tools": ["search_docs"],
+      "prompt": "Search the documentation for tool calling, limit 5.",
+      "expect": { "tool": "search_docs", "args": { "query": "tool calling", "limit": 5 } }
+    },
+    {
+      "name": "fake_trip",
+      "tags": ["format", "nested"],
+      "tools": ["book_trip"],
+      "prompt": "Book a trip to Rome for Ana, age 34.",
+      "expect": {
+        "tool": "book_trip",
+        "args": { "destination": "Rome", "traveller": { "name": "Ana", "age": 34 } }
+      }
+    },
+    {
+      "name": "fake_email",
+      "tags": ["format", "multi-tool"],
+      "tools": ["get_weather", "search_docs", "send_email"],
+      "prompt": "Send an email to Ana about the trip.",
+      "expect": {
+        "tool": "send_email",
+        "args": { "to": "ana@example.com", "subject": "Trip" }
+      }
+    },
+    {
+      "name": "fake_no_call",
+      "tags": ["no-call"],
+      "tools": ["get_weather"],
+      "prompt": "Please greet me politely.",
+      "expect": { "tool": null }
+    }
+  ]
+}

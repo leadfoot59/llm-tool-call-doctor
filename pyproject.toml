@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "toolcalldoctor"
+version = "0.1.0"
+description = "Diagnose and fix tool calling against local model backends (Ollama, llama.cpp, vLLM, SGLang, LM Studio, MLX)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["llm", "tool-calling", "ollama", "local-models", "agents", "json-schema"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Debuggers",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Intentionally empty: the whole toolkit is standard library only, so it runs
+# on the same box as the inference engine with no virtualenv.
+dependencies = []
+
+[project.optional-dependencies]
+dev = []
+
+[project.urls]
+Documentation = "https://github.com/"
+
+[project.scripts]
+toolcalldoctor = "toolcalldoctor.cli:main"
+
+[tool.setuptools]
+packages = ["toolcalldoctor"]
+
+[tool.setuptools.package-data]
+toolcalldoctor = ["py.typed"]

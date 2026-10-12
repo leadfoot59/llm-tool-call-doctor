@@ -1,0 +1,242 @@
+{
+  "_comment": "Human-written tool-calling cases. Prompt text is natural; expectations are what a competent assistant should do. Run with: python3 -m toolcalldoctor score --cases cases/basic.json --model <model> --base-url <url>",
+  "_tags": {
+    "basic": "single obvious tool call",
+    "numbers": "numeric argument that local models often stringify",
+    "nested": "object-valued argument",
+    "multi-tool": "tool selection matters",
+    "no-call": "the model must NOT call a tool",
+    "strict": "no extra keys allowed",
+    "strings": "tricky string values"
+  },
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather or forecast for a city.",
+        "parameters": {
+          "type": "object",
+          "required": ["city"],
+          "properties": {
+            "city": { "type": "string", "description": "The city name" },
+            "units": {
+              "type": "string",
+              "enum": ["metric", "imperial"],
+              "description": "Unit system for the result"
+            },
+            "days": {
+              "type": "integer",
+              "description": "Forecast horizon in days; omit for current conditions"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_docs",
+        "description": "Search the product documentation for a phrase.",
+        "parameters": {
+          "type": "object",
+          "required": ["query"],
+          "properties": {
+            "query": { "type": "string", "description": "Search phrase" },
+            "limit": { "type": "integer", "description": "Maximum number of results" }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "book_trip",
+        "description": "Book travel for a named traveller.",
+        "parameters": {
+          "type": "object",
+          "required": ["destination", "traveller"],
+          "properties": {
+            "destination": { "type": "string" },
+            "traveller": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": { "type": "string" },
+                "age": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "send_email",
+        "description": "Send an email message.",
+        "parameters": {
+          "type": "object",
+          "required": ["to", "subject"],
+          "properties": {
+            "to": { "type": "string" },
+            "subject": { "type": "string" },
+            "body": { "type": "string" }
+          }
+        }
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "weather_simple",
+      "tags": ["basic"],
+      "tools": ["get_weather"],
+      "prompt": "What is the weather in Paris right now?",
+      "expect": { "tool": "get_weather", "args": { "city": "Paris" } }
+    },
+    {
+      "name": "weather_units",
+      "tags": ["basic"],
+      "tools": ["get_weather"],
+      "prompt": "Get me the weather in Berlin using metric units.",
+      "expect": { "tool": "get_weather", "args": { "city": "Berlin", "units": "metric" } }
+    },
+    {
+      "name": "weather_days_integer",
+      "tags": ["numbers"],
+      "tools": ["get_weather"],
+      "prompt": "Give me the weather forecast for Tokyo for the next 5 days.",
+      "expect": {
+        "tool": "get_weather",
+        "args": { "city": "Tokyo", "days": 5 }
+      }
+    },
+    {
+      "name": "weather_imperial",
+      "tags": ["basic"],
+      "tools": ["get_weather"],
+      "prompt": "What is the temperature in New York in Fahrenheit? Use imperial units.",
+      "expect": {
+        "tool": "get_weather",
+        "args": { "city": "New York", "units": "imperial" }
+      }
+    },
+    {
+      "name": "weather_strict_single_key",
+      "tags": ["strict"],
+      "tools": ["get_weather"],
+      "prompt": "What is the weather in Lisbon?",
+      "expect": {
+        "tool": "get_weather",
+        "args": { "city": "Lisbon" },
+        "strict": true
+      }
+    },
+    {
+      "name": "search_with_limit",
+      "tags": ["numbers"],
+      "tools": ["search_docs"],
+      "prompt": "Search the documentation for structured outputs. Show at most 5 results.",
+      "expect": {
+        "tool": "search_docs",
+        "args": { "query": "structured outputs", "limit": 5 }
+      }
+    },
+    {
+      "name": "search_quoted_phrase",
+      "tags": ["strings"],
+      "tools": ["search_docs"],
+      "prompt": "Look up the exact phrase \"tool calling\" in the documentation.",
+      "expect": { "tool": "search_docs", "args": { "query": "tool calling" } }
+    },
+    {
+      "name": "search_apostrophe",
+      "tags": ["strings"],
+      "tools": ["search_docs"],
+      "prompt": "Search the docs for: what's new in version 2?",
+      "expect": {
+        "tool": "search_docs",
+        "args": { "query": "what's new in version 2" }
+      }
+    },
+    {
+      "name": "book_trip_nested",
+      "tags": ["nested", "numbers"],
+      "tools": ["book_trip"],
+      "prompt": "Book a trip to Rome for Ana, who is 34 years old.",
+      "expect": {
+        "tool": "book_trip",
+        "args": {
+          "destination": "Rome",
+          "traveller": { "name": "Ana", "age": 34 }
+        }
+      }
+    },
+    {
+      "name": "book_trip_minimal",
+      "tags": ["nested"],
+      "tools": ["book_trip"],
+      "prompt": "Book travel to Kyoto for Sam.",
+      "expect": {
+        "tool": "book_trip",
+        "args": { "destination": "Kyoto", "traveller": { "name": "Sam" } }
+      }
+    },
+    {
+      "name": "email_send",
+      "tags": ["basic"],
+      "tools": ["send_email"],
+      "prompt": "Email ana@example.com with the subject \"Trip confirmed\".",
+      "expect": {
+        "tool": "send_email",
+        "args": { "to": "ana@example.com", "subject": "Trip confirmed" }
+      }
+    },
+    {
+      "name": "choose_search_from_many",
+      "tags": ["multi-tool"],
+      "tools": ["get_weather", "search_docs", "send_email"],
+      "prompt": "Find the docs page about authentication.",
+      "expect": { "tool": "search_docs", "args": { "query": "authentication" } }
+    },
+    {
+      "name": "choose_weather_from_many",
+      "tags": ["multi-tool"],
+      "tools": ["get_weather", "search_docs", "send_email"],
+      "prompt": "Is it raining in Dublin at the moment?",
+      "expect": { "tool": "get_weather", "args": { "city": "Dublin" } }
+    },
+    {
+      "name": "choose_email_from_many",
+      "tags": ["multi-tool"],
+      "tools": ["get_weather", "search_docs", "send_email"],
+      "prompt": "Tell Sam that the meeting moved to 3pm, by email to sam@example.com.",
+      "expect": {
+        "tool": "send_email",
+        "args": { "to": "sam@example.com" }
+      }
+    },
+    {
+      "name": "no_call_greeting",
+      "tags": ["no-call"],
+      "tools": ["get_weather", "search_docs"],
+      "prompt": "Hello! How are you today?",
+      "expect": { "tool": null }
+    },
+    {
+      "name": "no_call_arithmetic",
+      "tags": ["no-call"],
+      "tools": ["get_weather", "search_docs"],
+      "prompt": "What is 17 multiplied by 4?",
+      "expect": { "tool": null }
+    },
+    {
+      "name": "no_call_explanation",
+      "tags": ["no-call"],
+      "tools": ["search_docs"],
+      "prompt": "In one sentence, explain what a JSON schema is.",
+      "expect": { "tool": null }
+    }
+  ]
+}
