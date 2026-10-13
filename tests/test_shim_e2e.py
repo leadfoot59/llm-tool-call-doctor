@@ -652,6 +652,59 @@ class TestToolDump(unittest.TestCase):
                 backend.stop()
 
 
+class TestRejectedCallsAreVisible(unittest.TestCase):
+    """A refused call must not become a silent empty turn.
+
+    Otherwise the harness sees "the model returned nothing", the model never
+    learns which name was wrong, and it repeats it.
+    """
+
+    def test_unknown_tool_name_is_reported_in_content(self):
+        backend = start_fake_backend()
+        shim = start_shim(backend.base_url)
+        try:
+            body = payload("fake/hermes")
+            body["messages"] = [
+                {"role": "user", "content": "[[force:search<|channel|>analysis]] go"}
+            ]
+            response = post_json(f"{shim.base_url}/chat/completions", body)
+            message = response["choices"][0]["message"]
+            self.assertFalse(message.get("tool_calls"))
+            self.assertIn("does not exist", message["content"] or "")
+            self.assertIn("search<|channel|>analysis", message["content"] or "")
+        finally:
+            shim.stop()
+            backend.stop()
+
+    def test_reporting_can_be_turned_off(self):
+        backend = start_fake_backend()
+        shim = start_shim(backend.base_url, report_rejections=False)
+        try:
+            body = payload("fake/hermes")
+            body["messages"] = [{"role": "user", "content": "[[force:search]] go"}]
+            response = post_json(f"{shim.base_url}/chat/completions", body)
+            content = response["choices"][0]["message"].get("content") or ""
+            self.assertNotIn("does not exist", content)
+        finally:
+            shim.stop()
+            backend.stop()
+
+    def test_a_valid_call_is_untouched_by_the_diagnostic(self):
+        backend = start_fake_backend()
+        shim = start_shim(backend.base_url, include_meta=True)
+        try:
+            response = post_json(
+                f"{shim.base_url}/chat/completions", payload("fake/hermes")
+            )
+            self.assertIsNone(response["choices"][0]["message"]["content"])
+            self.assertEqual(
+                response["_toolcalldoctor"]["action"], "recovered_tool_call_tags"
+            )
+        finally:
+            shim.stop()
+            backend.stop()
+
+
 class TestFailureModes(unittest.TestCase):
     def test_on_parse_failure_error_returns_422_for_a_mangled_attempt(self):
         backend = start_fake_backend()

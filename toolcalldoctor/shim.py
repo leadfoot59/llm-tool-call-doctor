@@ -71,6 +71,10 @@ class ShimConfig:
     # usually generated at runtime, so reading the harness's source is not the
     # same as seeing what it puts on the wire.
     dump_tools: str | None = None
+    # When a call is refused for naming an unknown tool, say so in `content`
+    # instead of returning a turn with nothing in it. The model needs the
+    # feedback or it repeats the same wrong name.
+    report_rejections: bool = True
 
     def options(self) -> Options:
         return Options(
@@ -737,6 +741,16 @@ class ShimHandler(BaseHTTPRequestHandler):
             return
 
         response = build_response(message, finish, meta, model, calls, config)
+        if action == "rejected" and config.report_rejections:
+            # Dropping the call silently turns "the model called a tool that
+            # does not exist" into "the model returned nothing", and the model
+            # never learns which name was wrong -- so it repeats it. A harness
+            # that dispatches tools would have said so; do the same.
+            detail = "; ".join(result.errors) or "unknown tool"
+            response["choices"][0]["message"]["content"] = (
+                "[toolcalldoctor] the model called a tool that does not exist "
+                f"({detail}). Retry using one of the tool names exactly as given."
+            )
         if config.include_meta:
             response["_toolcalldoctor"] = {
                 "action": action,

@@ -485,6 +485,12 @@ stacking duplicates — and it polls `/health` before reporting success, printin
 the tail of the log if the process died during startup. A dead upstream is a
 warning, not a refusal.
 
+A call naming a tool that does not exist is **reported in `content`**
+rather than dropped. Silently refusing it turns "the model called a tool that
+doesn't exist" into "the model returned nothing" — the harness cannot show the
+model which name was wrong, so it repeats it. `--no-report-rejections` turns the
+diagnostic off.
+
 **Run it from your own terminal.** Processes started from an agent session are
 cleaned up when that session ends, so a shim launched on your behalf may not be
 there later. `./run_shims.sh status` is the honest check; if it says `down`,
@@ -554,7 +560,7 @@ script on the machine.
 python3 tests/run_all.py        # or: python3 -m toolcalldoctor selftest
 ```
 
-302 tests, no dependencies. The end-to-end tests start a real HTTP backend and
+305 tests, no dependencies. The end-to-end tests start a real HTTP backend and
 a real HTTP shim in-process and assert over the wire, including every dialect,
 streaming, the constrained path, the 422 path, the trace log, the sandbox
 guard, and the agent matrix. Verified on Python 3.12 and 3.14.

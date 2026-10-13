@@ -115,6 +115,7 @@ def cmd_shim(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         trace=args.trace,
         dump_tools=args.dump_tools,
+        report_rejections=not args.no_report_rejections,
         quiet=args.quiet,
         include_meta=args.meta,
     )
@@ -468,6 +469,13 @@ def build_parser() -> argparse.ArgumentParser:
         "in the same shape as cases/agent_tools.json. The authoritative way to "
         "capture a harness's real toolbox: schemas are usually generated at "
         "runtime, so reading its source is not the same as what it sends.",
+    )
+    p_shim.add_argument(
+        "--no-report-rejections",
+        action="store_true",
+        help="when a call names an unknown tool, do not add a diagnostic to "
+        "content. Off by default: without it the turn looks empty and the "
+        "model never learns which name was wrong.",
     )
     p_shim.add_argument("--meta", action="store_true", help="add a _toolcalldoctor block to responses")
     p_shim.add_argument("--quiet", action="store_true", help="suppress access logging")

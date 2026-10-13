@@ -219,7 +219,9 @@ def build_agent_turn(
 def choose_tool(prompt: str, tools: list[dict[str, Any]]) -> str | None:
     # Test affordance: "[[force:name]]" makes the model call that tool even when
     # it was not advertised, which is how we verify the shim still accepts it.
-    forced = re.search(r"\[\[force:([A-Za-z0-9_.\-]+)\]\]", prompt)
+    # The name may contain model control tokens, so the class is deliberately
+    # broad: anything up to the closing brackets.
+    forced = re.search(r"\[\[force:([^\]\s]+)\]\]", prompt)
     if forced:
         return forced.group(1)
     lowered = prompt.lower()
