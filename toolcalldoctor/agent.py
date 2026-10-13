@@ -159,8 +159,50 @@ class Sandbox:
         self.dry_run = dry_run
         self.read_only = read_only
         self.usage: dict[str, int] = {}
+        # path -> version token at the time the agent last read it. Mirrors
+        # DSH's fs-observation-policy, which requires a read before a mutation
+        # and rejects it when the file has changed since.
+        self._observed: dict[str, str] = {}
 
     # -- helpers -----------------------------------------------------------
+
+    @staticmethod
+    def _version(path: Path) -> str | None:
+        """Opaque version token, as DSH derives it: dev:ino:size:mtime:ctime.
+
+        Metadata-based on purpose -- rewriting a file with identical content
+        still changes it, and an editor that saves atomically replaces the
+        inode. Both invalidate a previous read.
+        """
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        return f"{st.st_dev}:{st.st_ino}:{st.st_size}:{st.st_mtime_ns}:{st.st_ctime_ns}"
+
+    def _stale_reason(self, path: Path, verb: str) -> str | None:
+        """Why a mutation of ``path`` is refused, or None if it may proceed."""
+        current = self._version(path)
+        if current is None:
+            return None  # creating a new file: nothing to guard against
+        seen = self._observed.get(str(path))
+        if seen is None:
+            return (
+                f'cannot {verb} "{path}": read the file before {verb}ing it'
+            )
+        if seen != current:
+            return (
+                f'cannot {verb} "{path}": file changed since it was read '
+                "— re-read the file, then retry"
+            )
+        return None
+
+    def _observe(self, path: Path) -> None:
+        version = self._version(path)
+        if version is not None:
+            self._observed[str(path)] = version
+        else:
+            self._observed.pop(str(path), None)
 
     def guard(self, command: str) -> str | None:
         """Return a refusal reason, or None if the command is allowed."""
@@ -270,6 +312,7 @@ class Sandbox:
         else:
             footer = f"(End of file - total {total} lines)"
         body = f"{numbered}\n\n{footer}" if window else footer
+        self._observe(path)
         return "ok", (
             f"<path>{raw}</path> <type>file</type> <content> {body} </content>"
         )
@@ -281,9 +324,13 @@ class Sandbox:
         if not raw:
             return "error", "no file_path given"
         path = self._path(raw)
+        refusal = self._stale_reason(path, "write")
+        if refusal:
+            return "refused", refusal
         path.parent.mkdir(parents=True, exist_ok=True)
         content = args.get("content")
         path.write_text("" if content is None else str(content))
+        self._observe(path)
         return "ok", f"wrote {len(path.read_text())} bytes to {path.name}"
 
     def _t_edit(self, args: dict[str, Any]) -> tuple[str, str]:
@@ -293,12 +340,18 @@ class Sandbox:
         path = self._path(raw)
         if not path.is_file():
             return "error", f"cannot edit missing file {raw!r}"
+        refusal = self._stale_reason(path, "edit")
+        if refusal:
+            return "refused", refusal
         old = str(args.get("old_string") or "")
         new = str(args.get("new_string") or "")
         text = path.read_text()
         if old and old not in text:
             return "error", f"old_string not found in {raw!r}"
         path.write_text(text.replace(old, new, 1) if old else new)
+        # A successful mutation refreshes the observation, as DSH does, so a
+        # second edit in the same turn does not need another read.
+        self._observe(path)
         return "ok", f"edited {path.name}"
 
     def _t_glob(self, args: dict[str, Any]) -> tuple[str, str]:

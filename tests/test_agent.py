@@ -239,6 +239,9 @@ class TestSandbox(unittest.TestCase):
 
     def test_edit_replaces_once(self):
         (self.root / "config.txt").write_text("debug=false\ndebug=false\n")
+        # The observation policy requires a read first, so a realistic caller
+        # reads before editing.
+        self.sandbox.run("read", {"file_path": "config.txt"})
         status, _ = self.sandbox.run(
             "edit",
             {
@@ -253,6 +256,7 @@ class TestSandbox(unittest.TestCase):
         )
 
     def test_edit_missing_old_string(self):
+        self.sandbox.run("read", {"file_path": "notes.txt"})
         status, output = self.sandbox.run(
             "edit",
             {"file_path": "notes.txt", "old_string": "zzz", "new_string": "y"},
@@ -587,6 +591,101 @@ class TestRecommendationLogic(unittest.TestCase):
         verdict = recommend(results, self.TOOLBOX)
         self.assertIn("no menu achieved every task", verdict)
         self.assertIn("limit is the model", verdict)
+
+
+class TestObservationPolicy(unittest.TestCase):
+    """Read-before-edit and staleness, as DSH's fs-observation-policy enforces.
+
+    Without this the simulator accepts mutations DSH refuses, and the agent
+    matrix silently under-reports a whole failure class.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "page.html").write_text("<html>\nold\n</html>\n")
+        self.sb = Sandbox(self.root)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def edit(self, **kw):
+        args = {
+            "file_path": "page.html",
+            "old_string": "old",
+            "new_string": "new",
+        }
+        args.update(kw)
+        return self.sb.run("edit", args)
+
+    def test_edit_after_read_succeeds(self):
+        self.sb.run("read", {"file_path": "page.html"})
+        status, _ = self.edit()
+        self.assertEqual(status, "ok")
+        self.assertIn("new", (self.root / "page.html").read_text())
+
+    def test_edit_without_reading_first_is_refused(self):
+        status, output = self.edit()
+        self.assertEqual(status, "refused")
+        self.assertIn("read the file before", output)
+
+    def test_edit_after_the_file_changed_is_refused(self):
+        self.sb.run("read", {"file_path": "page.html"})
+        # Something else touches the file -- typically a bash command.
+        self.sb.run("bash", {"command": "printf 'x\\n' >> page.html"})
+        status, output = self.edit()
+        self.assertEqual(status, "refused")
+        self.assertIn("file changed since it was read", output)
+        self.assertIn("re-read the file, then retry", output)
+
+    def test_rereading_unblocks_the_edit(self):
+        self.sb.run("read", {"file_path": "page.html"})
+        self.sb.run("bash", {"command": "printf 'x\\n' >> page.html"})
+        self.assertEqual(self.edit()[0], "refused")
+        self.sb.run("read", {"file_path": "page.html"})
+        self.assertEqual(self.edit()[0], "ok")
+
+    def test_second_edit_needs_no_second_read(self):
+        self.sb.run("read", {"file_path": "page.html"})
+        self.assertEqual(self.edit()[0], "ok")
+        status, output = self.edit(old_string="new", new_string="newer")
+        self.assertEqual(status, "ok", output)
+
+    def test_identical_rewrite_still_invalidates_the_read(self):
+        # The version is metadata-based, so same bytes with a new mtime counts.
+        self.sb.run("read", {"file_path": "page.html"})
+        text = (self.root / "page.html").read_text()
+        import os
+        import time
+
+        time.sleep(0.01)
+        (self.root / "page.html").write_text(text)
+        os.utime(self.root / "page.html", None)
+        status, output = self.edit()
+        self.assertEqual(status, "refused")
+        self.assertIn("file changed", output)
+
+    def test_overwriting_an_unread_file_is_refused(self):
+        status, output = self.sb.run(
+            "write", {"file_path": "page.html", "content": "replaced"}
+        )
+        self.assertEqual(status, "refused")
+        self.assertIn("read the file before", output)
+
+    def test_creating_a_new_file_needs_no_read(self):
+        status, _ = self.sb.run(
+            "write", {"file_path": "fresh.txt", "content": "hello"}
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual((self.root / "fresh.txt").read_text(), "hello")
+
+    def test_read_then_write_over_the_same_file_is_allowed(self):
+        self.sb.run("read", {"file_path": "page.html"})
+        status, _ = self.sb.run(
+            "write", {"file_path": "page.html", "content": "replaced"}
+        )
+        self.assertEqual(status, "ok")
+        self.assertEqual((self.root / "page.html").read_text(), "replaced")
 
 
 class TestTransportFailure(unittest.TestCase):
