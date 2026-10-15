@@ -169,6 +169,78 @@ def _coerce_scalar(value: Any, types: list[str]) -> tuple[Any, str | None]:
     return value, None
 
 
+# Property names that carry the substance of a request, as opposed to
+# identifying it. Used to place a bare value that arrived where an object was
+# expected.
+_CONTENT_KEYS = (
+    "question",
+    "query",
+    "prompt",
+    "text",
+    "message",
+    "content",
+    "value",
+    "body",
+    "description",
+    "label",
+)
+
+# Names that exist to be arbitrary. `name` is deliberately absent: it usually
+# refers to something real.
+_ID_RE = re.compile(r"^(id|[a-z0-9]+_id|key)$")
+
+
+def _content_key(schema: dict[str, Any]) -> str | None:
+    """Which property a bare scalar belongs under, if any is unambiguous."""
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return None
+    for key in _CONTENT_KEYS:
+        if key in props:
+            return key
+    # Otherwise only a single required string field is unambiguous: with one
+    # field the value can only be that field. Two or more would be a guess.
+    required = [k for k in (schema.get("required") or []) if k in props]
+    if len(required) != 1:
+        return None
+    key = required[0]
+    sub = props.get(key)
+    if (
+        isinstance(sub, dict)
+        and _types_of(sub) == ["string"]
+        and not _ID_RE.match(key)
+    ):
+        return key
+    return None
+
+
+def _mintable_id(
+    key: str, sub: dict[str, Any], schema: dict[str, Any], present: dict[str, Any]
+) -> bool:
+    """May we invent this missing identifier?
+
+    Only when the name exists to be arbitrary, the schema does not constrain it,
+    and every *other* required property is already present -- the model supplied
+    the substance and merely forgot the label. Minting into an otherwise-empty
+    object would be inventing a target, which is not ours to do: a wrong `id`
+    silently addresses the wrong thing.
+    """
+    if not _ID_RE.match(key):
+        return False
+    if _types_of(sub) != ["string"]:
+        return False
+    if any(marker in sub for marker in ("pattern", "enum", "const", "default")):
+        return False
+    others = [k for k in (schema.get("required") or []) if k != key]
+    return bool(others) and all(k in present for k in others)
+
+
+def _mint_id(path: str) -> str:
+    """Deterministic, so the same request mints the same value."""
+    match = re.search(r"\[(\d+)\]\s*$", path)
+    return f"q{match.group(1)}" if match else "generated_id"
+
+
 def coerce(
     instance: Any, schema: dict[str, Any] | None, path: str = "$"
 ) -> tuple[Any, list[str]]:
@@ -201,9 +273,17 @@ def coerce(
             # coerce() already returns notes carrying their own full path.
             notes.extend(sub_notes)
         for key in schema.get("required") or []:
-            if key not in out and isinstance(props.get(key), dict) and "default" in props[key]:
-                out[key] = props[key]["default"]
+            if key in out:
+                continue
+            sub = props.get(key)
+            if not isinstance(sub, dict):
+                continue
+            if "default" in sub:
+                out[key] = sub["default"]
                 notes.append(f"{path}.{key}: filled missing property from schema default")
+            elif _mintable_id(key, sub, schema, out):
+                out[key] = _mint_id(path)
+                notes.append(f"{path}.{key}: minted placeholder {out[key]!r}")
         enum = schema.get("enum")
         if isinstance(enum, list):
             pass
@@ -233,6 +313,17 @@ def coerce(
                 # fields *inside* it get coerced too.
                 instance, inner_notes = coerce(instance, schema, path)
                 notes.extend(inner_notes)
+
+    # A bare value where the schema wants an object: a model that sends
+    # ["why?"] means [{"question": "why?"}]. Only when the schema makes the
+    # destination obvious -- never guess which field a stray value belongs in.
+    if "object" in types and isinstance(instance, str):
+        key = _content_key(schema)
+        if key is not None:
+            notes.append(f"{path}: wrapped bare value as object under {key!r}")
+            instance, inner_notes = coerce({key: instance}, schema, path)
+            notes.extend(inner_notes)
+            return instance, notes
 
     if isinstance(instance, list) and "array" in types:
         pass

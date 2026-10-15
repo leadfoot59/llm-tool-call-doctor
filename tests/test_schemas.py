@@ -204,6 +204,151 @@ class TestCoerce(unittest.TestCase):
         self.assertEqual(notes, [])
 
 
+class TestBareValueWhereObjectExpected(unittest.TestCase):
+    """`questions: ["why?"]` means `questions: [{question: "why?"}]`.
+
+    Observed from a real harness: gpt-oss sent an array of strings where the
+    schema wanted an array of objects, and the harness rejected it with
+    "questions[0] must be an object".
+    """
+
+    QUESTIONS = {
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["id", "question"],
+                    "properties": {
+                        "id": {"type": "string"},
+                        "question": {"type": "string"},
+                        "header": {"type": "string"},
+                    },
+                },
+            }
+        },
+    }
+
+    def test_bare_string_is_wrapped_under_the_content_property(self):
+        out, notes = coerce({"questions": ["Why is the sky blue?"]}, self.QUESTIONS)
+        self.assertEqual(out["questions"][0]["question"], "Why is the sky blue?")
+        self.assertTrue(any("wrapped bare value" in n for n in notes))
+
+    def test_wrapping_then_fills_the_missing_id_so_it_validates(self):
+        out, _ = coerce({"questions": ["Why?"]}, self.QUESTIONS)
+        self.assertEqual(validate(out, self.QUESTIONS), [])
+
+    def test_a_scalar_is_not_guessed_into_an_object_without_a_content_field(self):
+        opaque = {
+            "type": "object",
+            "required": ["alpha", "beta"],
+            "properties": {"alpha": {"type": "string"}, "beta": {"type": "string"}},
+        }
+        out, notes = coerce("stray", opaque)
+        self.assertEqual(out, "stray")
+        self.assertEqual(notes, [])
+
+    def test_a_single_required_field_is_unambiguous_and_does_wrap(self):
+        # With one field the value can only be that field, so this is not a guess.
+        single = {
+            "type": "object",
+            "required": ["body"],
+            "properties": {"body": {"type": "string"}},
+        }
+        out, notes = coerce("hello", single)
+        self.assertEqual(out, {"body": "hello"})
+        self.assertTrue(any("wrapped bare value" in n for n in notes))
+
+
+class TestMintingMissingIdentifiers(unittest.TestCase):
+    """An omitted identifier is filled only when that is safe.
+
+    The danger is inventing a value that addresses something real, so minting
+    requires an id-like name, no schema constraint, and every other required
+    property already supplied.
+    """
+
+    ASK = {
+        "type": "object",
+        "required": ["id", "question"],
+        "properties": {"id": {"type": "string"}, "question": {"type": "string"}},
+    }
+
+    def test_id_is_minted_when_the_substance_is_already_present(self):
+        out, notes = coerce({"question": "Which mode?"}, self.ASK)
+        self.assertTrue(out["id"])
+        self.assertTrue(any("minted placeholder" in n for n in notes))
+        self.assertEqual(validate(out, self.ASK), [])
+
+    def test_minting_is_deterministic(self):
+        first, _ = coerce({"question": "Which mode?"}, self.ASK)
+        second, _ = coerce({"question": "Which mode?"}, self.ASK)
+        self.assertEqual(first["id"], second["id"])
+
+    def test_sibling_items_get_distinct_ids(self):
+        schema = {
+            "type": "object",
+            "properties": {"questions": {"type": "array", "items": self.ASK}},
+        }
+        out, _ = coerce({"questions": [{"question": "a"}, {"question": "b"}]}, schema)
+        ids = [q["id"] for q in out["questions"]]
+        self.assertEqual(len(set(ids)), 2, ids)
+        self.assertEqual(validate(out, schema), [])
+
+    def test_an_id_that_is_the_only_requirement_is_not_minted(self):
+        # Nothing else was supplied: minting here would invent a target.
+        only_id = {
+            "type": "object",
+            "required": ["id"],
+            "properties": {"id": {"type": "string"}},
+        }
+        out, notes = coerce({}, only_id)
+        self.assertNotIn("id", out)
+        self.assertEqual(notes, [])
+
+    def test_content_fields_are_never_minted(self):
+        # `question` is the substance; inventing it would fabricate the request.
+        out, notes = coerce({"id": "q0"}, self.ASK)
+        self.assertNotIn("question", out)
+        self.assertEqual(notes, [])
+
+    def test_a_patterned_id_is_not_minted(self):
+        patterned = {
+            "type": "object",
+            "required": ["id", "question"],
+            "properties": {
+                "id": {"type": "string", "pattern": "^[0-9]+$"},
+                "question": {"type": "string"},
+            },
+        }
+        out, _ = coerce({"question": "Which mode?"}, patterned)
+        self.assertNotIn("id", out)
+
+    def test_a_default_still_wins_over_minting(self):
+        defaulted = {
+            "type": "object",
+            "required": ["id", "question"],
+            "properties": {
+                "id": {"type": "string", "default": "fixed"},
+                "question": {"type": "string"},
+            },
+        }
+        out, notes = coerce({"question": "Which mode?"}, defaulted)
+        self.assertEqual(out["id"], "fixed")
+        self.assertTrue(any("schema default" in n for n in notes))
+
+    def test_a_non_identifier_required_field_is_not_minted(self):
+        # `header` is not an identifier, so its absence is the model's business.
+        schema = {
+            "type": "object",
+            "required": ["id", "header"],
+            "properties": {"id": {"type": "string"}, "header": {"type": "string"}},
+        }
+        out, _ = coerce({"id": "q0"}, schema)
+        self.assertNotIn("header", out)
+
+
 class TestSchemaHelpers(unittest.TestCase):
     def test_example_for_object(self):
         example = example_for(WEATHER)

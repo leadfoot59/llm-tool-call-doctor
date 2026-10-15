@@ -287,6 +287,14 @@ comes back:
   truncation, double encoding, Python literals)
 - coerces argument types toward the tool's JSON Schema (`"3"` → `3`,
   `"true"` → `true`, `"metric"` → `"metric"`, JSON-in-a-string → object)
+- repairs argument *shape* against the schema: a bare string where an object is
+  required is wrapped under the schema's content field (`["why?"]` →
+  `[{"question": "why?"}]`), and an omitted identifier is minted when that is
+  safe. Minting requires an id-like name (`id`, `*_id`, `key`), no `pattern`/
+  `enum`/`default`, and every *other* required field already supplied — the
+  model gave the substance and forgot the label. It will not mint into an
+  otherwise-empty object, because a wrong `id` silently addresses the wrong
+  thing, and it never invents content fields (`question`, `text`, …)
 - normalizes `finish_reason` — mlx-lm emits `"tool_call"`, the spec says
   `"tool_calls"`, and harnesses differ on whether they care
 - optionally returns HTTP 422 instead of silently leaking raw markup
@@ -560,7 +568,7 @@ script on the machine.
 python3 tests/run_all.py        # or: python3 -m toolcalldoctor selftest
 ```
 
-305 tests, no dependencies. The end-to-end tests start a real HTTP backend and
+317 tests, no dependencies. The end-to-end tests start a real HTTP backend and
 a real HTTP shim in-process and assert over the wire, including every dialect,
 streaming, the constrained path, the 422 path, the trace log, the sandbox
 guard, and the agent matrix. Verified on Python 3.12 and 3.14.
